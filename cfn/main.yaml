@@ -1,0 +1,151 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MegaFab Industrial Supply Co. - complete cloud platform (SYED FORGE).
+  Root stack: deploys the six layers as nested stacks in dependency order, so the whole
+  environment can be created, cloned or torn down with one command.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Required }
+        Parameters: [NotificationEmail, ArtifactBucket, AppBundleKey, WorkerBundleKey]
+      - Label: { default: Security & resilience options }
+        Parameters: [CertificateArn, MultiAZ, HighAvailabilityNat, EnableCloudTrail, CreateIdentities, EnableCloudFront, AdminCidr]
+
+Parameters:
+  Project: { Type: String, Default: megafab, AllowedPattern: "[a-z][a-z0-9-]{2,15}" }
+  NotificationEmail: { Type: String, AllowedPattern: ".+@.+\\..+" }
+  ArtifactBucket: { Type: String }
+  AppBundleKey: { Type: String }
+  WorkerBundleKey: { Type: String }
+  CertificateArn: { Type: String, Default: "" }
+  MultiAZ: { Type: String, AllowedValues: ["true", "false"], Default: "true" }
+  HighAvailabilityNat: { Type: String, AllowedValues: ["true", "false"], Default: "false" }
+  EnableCloudTrail: { Type: String, AllowedValues: ["true", "false"], Default: "true" }
+  CreateIdentities: { Type: String, AllowedValues: ["true", "false"], Default: "false" }
+  EnableCloudFront: { Type: String, AllowedValues: ["true", "false"], Default: "false" }
+  AdminCidr: { Type: String, Default: 127.0.0.1/32 }
+  LabRoleName: { Type: String, Default: LabRole }
+  InstanceProfile: { Type: String, Default: LabInstanceProfile }
+  KeyName: { Type: String, Default: vockey }
+
+Resources:
+  Foundation:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 00-foundation.yaml
+      Parameters:
+        Project: !Ref Project
+        LabRoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/${LabRoleName}"
+        EnableCloudTrail: !Ref EnableCloudTrail
+
+  Network:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 01-network.yaml
+      Parameters:
+        Project: !Ref Project
+        HighAvailabilityNat: !Ref HighAvailabilityNat
+        FlowLogBucketArn: !GetAtt Foundation.Outputs.LogsBucketArn
+
+  Security:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 02-security.yaml
+      Parameters:
+        Project: !Ref Project
+        AppVpcId: !GetAtt Network.Outputs.AppVpcId
+        MgmtVpcId: !GetAtt Network.Outputs.MgmtVpcId
+        MgmtVpcCidr: !GetAtt Network.Outputs.MgmtVpcCidr
+        AdminCidr: !Ref AdminCidr
+
+  Data:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 03-data.yaml
+      Parameters:
+        Project: !Ref Project
+        DataSubnets: !GetAtt Network.Outputs.DataSubnets
+        DbSg: !GetAtt Security.Outputs.DbSg
+        KeyArn: !GetAtt Foundation.Outputs.KeyArn
+        MultiAZ: !Ref MultiAZ
+
+  Integration:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 04-integration.yaml
+      Parameters:
+        Project: !Ref Project
+        KeyArn: !GetAtt Foundation.Outputs.KeyArn
+        LabRoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/${LabRoleName}"
+        NotificationEmail: !Ref NotificationEmail
+
+  Compute:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 05-compute.yaml
+      Parameters:
+        Project: !Ref Project
+        KeyName: !Ref KeyName
+        InstanceProfile: !Ref InstanceProfile
+        ServiceRoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/${LabRoleName}"
+        AppVpcId: !GetAtt Network.Outputs.AppVpcId
+        PublicSubnets: !GetAtt Network.Outputs.PublicSubnets
+        AppSubnets: !GetAtt Network.Outputs.AppSubnets
+        MgmtSubnet: !GetAtt Network.Outputs.MgmtSubnet
+        AlbSg: !GetAtt Security.Outputs.AlbSg
+        WebSg: !GetAtt Security.Outputs.WebSg
+        WorkerSg: !GetAtt Security.Outputs.WorkerSg
+        BastionSg: !GetAtt Security.Outputs.BastionSg
+        KeyArn: !GetAtt Foundation.Outputs.KeyArn
+        ArtifactBucket: !Ref ArtifactBucket
+        AppBundleKey: !Ref AppBundleKey
+        WorkerBundleKey: !Ref WorkerBundleKey
+        CertificateArn: !Ref CertificateArn
+        LogsBucket: !GetAtt Foundation.Outputs.LogsBucket
+        AssetsBucket: !GetAtt Foundation.Outputs.AssetsBucket
+        DocsBucket: !GetAtt Foundation.Outputs.DocsBucket
+        DbEndpoint: !GetAtt Data.Outputs.DbEndpoint
+        DbSecretArn: !GetAtt Data.Outputs.DbSecretArn
+        OrdersQueueUrl: !GetAtt Integration.Outputs.OrdersQueueUrl
+        OrdersQueueName: !GetAtt Integration.Outputs.OrdersQueueName
+        DlqUrl: !GetAtt Integration.Outputs.DlqUrl
+        TopicArn: !GetAtt Integration.Outputs.TopicArn
+        SwfDomain: !GetAtt Integration.Outputs.SwfDomain
+
+  Governance:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 06-dns-governance.yaml
+      Parameters:
+        Project: !Ref Project
+        AppVpcId: !GetAtt Network.Outputs.AppVpcId
+        MgmtVpcId: !GetAtt Network.Outputs.MgmtVpcId
+        EnvironmentCname: !GetAtt Compute.Outputs.EnvironmentCname
+        DbEndpoint: !GetAtt Data.Outputs.DbEndpoint
+        DbInstanceId: !GetAtt Data.Outputs.DbInstanceId
+        BastionPrivateIp: !GetAtt Compute.Outputs.BastionPrivateIp
+        KeyArn: !GetAtt Foundation.Outputs.KeyArn
+        AssetsBucketArn: !GetAtt Foundation.Outputs.AssetsBucketArn
+        DocsBucketArn: !GetAtt Foundation.Outputs.DocsBucketArn
+        TrailBucket: !GetAtt Foundation.Outputs.TrailBucket
+        OrdersQueueArn: !GetAtt Integration.Outputs.OrdersQueueArn
+        OrdersQueueName: !GetAtt Integration.Outputs.OrdersQueueName
+        TopicArn: !GetAtt Integration.Outputs.TopicArn
+        OpsTopicArn: !GetAtt Integration.Outputs.OpsTopicArn
+        DbSecretArn: !GetAtt Data.Outputs.DbSecretArn
+        SwfDomain: !GetAtt Integration.Outputs.SwfDomain
+        WorkerAsgName: !GetAtt Compute.Outputs.WorkerAsgName
+        CreateIdentities: !Ref CreateIdentities
+        EnableCloudFront: !Ref EnableCloudFront
+
+Outputs:
+  PortalHttpsUrl: { Description: "Customer portal via CloudFront - trusted HTTPS", Value: !GetAtt Governance.Outputs.PortalHttpsUrl }
+  PortalUrl: { Description: Customer portal (load balancer), Value: !Sub "http://${Compute.Outputs.EnvironmentCname}" }
+  OpsConsoleUrl: { Value: !Sub "http://${Compute.Outputs.EnvironmentCname}/ops" }
+  PublicNameServers: { Value: !GetAtt Governance.Outputs.PublicNameServers }
+  DashboardUrl: { Value: !GetAtt Governance.Outputs.DashboardUrl }
+  BastionId: { Value: !GetAtt Compute.Outputs.BastionId }
+  WorkerAsg: { Value: !GetAtt Compute.Outputs.WorkerAsgName }
+  DbEndpoint: { Value: !GetAtt Data.Outputs.DbEndpoint }
+  KmsKey: { Value: !GetAtt Foundation.Outputs.KeyArn }

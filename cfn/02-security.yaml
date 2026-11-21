@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MegaFab 02 - Security groups (instance-level, stateful). Each tier only accepts
+  traffic from the tier directly in front of it ("security-group chaining").
+
+Parameters:
+  Project: { Type: String, Default: megafab }
+  AppVpcId: { Type: AWS::EC2::VPC::Id }
+  MgmtVpcId: { Type: AWS::EC2::VPC::Id }
+  MgmtVpcCidr: { Type: String }
+  AdminCidr:
+    Type: String
+    Default: 127.0.0.1/32
+    Description: Public IP range allowed to SSH to the bastion. Default = closed (use SSM Session Manager).
+
+Resources:
+  AlbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public load balancer - HTTP/HTTPS from the internet
+      VpcId: !Ref AppVpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: HTTP (redirect / demo) }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref MgmtVpcCidr, Description: Admins via peering }
+      Tags: [{ Key: Name, Value: !Sub "${Project}-alb-sg" }]
+
+  WebSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Web tier (Elastic Beanstalk instances) - only from the ALB and management VPC
+      VpcId: !Ref AppVpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, SourceSecurityGroupId: !Ref AlbSg, Description: From ALB only }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref MgmtVpcCidr, Description: SSH from management VPC }
+      Tags: [{ Key: Name, Value: !Sub "${Project}-web-sg" }]
+
+  WorkerSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Fulfilment workers - no inbound except admin SSH from management VPC
+      VpcId: !Ref AppVpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref MgmtVpcCidr, Description: SSH from management VPC }
+      Tags: [{ Key: Name, Value: !Sub "${Project}-worker-sg" }]
+
+  DbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS MySQL - only from web, worker and management tiers
+      VpcId: !Ref AppVpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 3306, ToPort: 3306, SourceSecurityGroupId: !Ref WebSg, Description: Web tier }
+        - { IpProtocol: tcp, FromPort: 3306, ToPort: 3306, SourceSecurityGroupId: !Ref WorkerSg, Description: Worker tier }
+        - { IpProtocol: tcp, FromPort: 3306, ToPort: 3306, CidrIp: !Ref MgmtVpcCidr, Description: DBA access via VPC peering }
+      Tags: [{ Key: Name, Value: !Sub "${Project}-db-sg" }]
+
+  BastionSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Management bastion - SSH only from the admin range (default closed; SSM used instead)
+      VpcId: !Ref MgmtVpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref AdminCidr, Description: Admin SSH }
+      Tags: [{ Key: Name, Value: !Sub "${Project}-bastion-sg" }]
+
+Outputs:
+  AlbSg: { Value: !Ref AlbSg }
+  WebSg: { Value: !Ref WebSg }
+  WorkerSg: { Value: !Ref WorkerSg }
+  DbSg: { Value: !Ref DbSg }
+  BastionSg: { Value: !Ref BastionSg }

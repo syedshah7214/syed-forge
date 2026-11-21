@@ -1,0 +1,37 @@
+{% extends "console_base.html" %}
+{% block body %}
+<div class="page-h"><div><span class="eyebrow">EC2 &amp; Auto Scaling Monitor</span><h1>Compute fleet</h1>
+  <p>Configured capacity (min / desired / max) versus instances actually in service, read from the EC2 Auto Scaling API.</p></div>
+  <span class="badge info">This page: {{ instance_id }} · {{ az }}</span></div>
+<div class="cols-2" id="groups"><div class="card"><div class="card-b"><div class="sk" style="height:220px"></div></div></div><div class="card"><div class="card-b"><div class="sk" style="height:220px"></div></div></div></div>
+<section class="card mt"><div class="card-h"><h3>Recent scaling activity</h3><span class="eyebrow">describe-scaling-activities</span></div>
+  <div class="card-b tbl-wrap"><table class="table"><thead><tr><th>When</th><th>Group</th><th>Status</th><th>Activity</th></tr></thead><tbody id="acts"></tbody></table></div></section>
+<section class="card mt"><div class="card-h"><h3>Scaling policies (configured)</h3><span class="eyebrow">from CloudFormation · not live</span></div>
+  <div class="card-b cols-2" style="font-size:14px;color:var(--muted)">
+    <div><b style="color:var(--text)">Web tier (Elastic Beanstalk)</b><p style="margin:6px 0 0">t3.micro · min 2 / max 6 across two AZs · add 2 instances when average CPU &gt; 45 % for 1 min · remove 1 below 15 % · rolling deployments keep capacity.</p></div>
+    <div><b style="color:var(--text)">Fulfilment workers</b><p style="margin:6px 0 0">Launch template from the AL2023 AMI · min 1 / max 4 · step scaling on SQS backlog (messages visible) · each worker caps itself at 4 open workflows (back-pressure).</p></div>
+  </div></section>
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const ok = x => x && x.state === "ok";
+  const group = (title, g) => {
+    if (!g) return `<section class="card"><div class="card-h"><h3>${title}</h3></div><div class="card-b empty">Group not found</div></section>`;
+    const seg = Array.from({length: g.max}, (_, i) => `<i style="flex:1;height:22px;border-radius:5px;background:${i < g.in_service ? "linear-gradient(90deg,var(--amber),#ffd45c)" : i < g.desired ? "rgba(255,184,0,.25)" : i < g.min ? "rgba(148,163,184,.25)" : "rgba(148,163,184,.08)"}"></i>`).join("");
+    return `<section class="card glow"><div class="card-h"><h3>${title}</h3><span class="badge ${g.in_service >= g.min ? "ok" : "warn"}">${g.in_service} in service</span></div><div class="card-b">
+      <div style="display:flex;gap:4px">${seg}</div>
+      <div class="mono dim" style="font-size:11px;margin:6px 0 14px">min ${g.min} · desired ${g.desired} · max ${g.max} · AZs ${g.azs.join(", ")}${g.suspended.length ? " · suspended: " + g.suspended.join(", ") : ""}</div>
+      <table class="table"><thead><tr><th>Instance</th><th>AZ</th><th>Type</th><th>Lifecycle</th><th>Health</th></tr></thead><tbody>${g.instances.map(i =>
+        `<tr><td class="mono" style="font-size:11.5px">${NX.esc(i.id)}</td><td class="mono">${NX.esc(i.az)}</td><td class="mono">${NX.esc(i.type)}</td><td><span class="badge ${i.lifecycle === "InService" ? "ok" : "warn"}">${NX.esc(i.lifecycle)}</span></td><td><span class="badge ${i.health === "Healthy" ? "ok" : "bad"}">${NX.esc(i.health)}</span></td></tr>`).join("") || '<tr><td colspan="5" class="empty">No instances</td></tr>'}</tbody></table></div></section>`;
+  };
+  async function load() {
+    const c = await NX.get("/api/ops/compute"); NX.stamp();
+    if (!ok(c)) { document.getElementById("groups").innerHTML = `<section class="card" style="grid-column:1/-1"><div class="card-b empty">Auto Scaling data unavailable (${NX.esc(c.reason || "no response")}). Instance health is not shown rather than guessed.</div></section>`; document.getElementById("acts").innerHTML = ""; return; }
+    document.getElementById("groups").innerHTML = group("Web tier · " + "{{ env_name }}", c.web) + group("Fulfilment workers ASG", c.workers);
+    document.getElementById("acts").innerHTML = c.activities.length ? c.activities.map(a => `<tr><td class="dim" style="white-space:nowrap">${NX.ago(a.time)}</td><td>${a.group}</td><td><span class="badge ${a.status === "Successful" ? "ok" : a.status === "Failed" ? "bad" : "warn"}">${NX.esc(a.status)}</span></td><td style="font-size:12.5px">${NX.esc(a.text)}</td></tr>`).join("") : '<tr><td colspan="4" class="empty">No scaling activity recorded</td></tr>';
+  }
+  NX.poll(load, 20000);
+})();
+</script>
+{% endblock %}

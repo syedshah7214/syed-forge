@@ -1,0 +1,280 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MegaFab 00 - Security foundation. Customer-managed KMS key, encrypted S3 buckets
+  (assets, documents/backups, logs, audit), CloudTrail with log-file validation, and
+  account-wide EBS encryption-by-default with the MegaFab key.
+
+Parameters:
+  Project: { Type: String, Default: megafab }
+  LabRoleArn: { Type: String, Description: Execution role for custom-resource Lambdas (Learner Lab LabRole) }
+  EnableCloudTrail: { Type: String, AllowedValues: ["true", "false"], Default: "true" }
+
+Conditions:
+  Trail: !Equals [!Ref EnableCloudTrail, "true"]
+
+Mappings:
+  ElbAccount:  # account that writes ALB access logs, per region
+    us-east-1: { Id: "127311923021" }
+    us-west-2: { Id: "797873946194" }
+
+Resources:
+  # ---------------------------------------------------------------- KMS
+  DataKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: MegaFab data-at-rest key (RDS, S3, EBS, SQS, SNS, Secrets, CloudTrail)
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AccountAdministration
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root" }
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AutoScalingUseForEncryptedEbs
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling" }
+            Action: [kms:Encrypt, kms:Decrypt, kms:ReEncrypt*, kms:GenerateDataKey*, kms:DescribeKey]
+            Resource: "*"
+          - Sid: AutoScalingGrants
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling" }
+            Action: kms:CreateGrant
+            Resource: "*"
+            Condition: { Bool: { "kms:GrantIsForAWSResource": true } }
+          - Sid: CloudTrailEncryptLogs
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: [kms:GenerateDataKey*, kms:DescribeKey]
+            Resource: "*"
+            Condition:
+              StringLike: { "kms:EncryptionContext:aws:cloudtrail:arn": !Sub "arn:aws:cloudtrail:*:${AWS::AccountId}:trail/*" }
+          - Sid: AlarmsAndEventsToEncryptedTopics
+            Effect: Allow
+            Principal: { Service: [cloudwatch.amazonaws.com, events.amazonaws.com] }
+            Action: [kms:GenerateDataKey*, kms:Decrypt]
+            Resource: "*"
+      Tags: [{ Key: Project, Value: !Ref Project }]
+  DataKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties: { AliasName: !Sub "alias/${Project}-data", TargetKeyId: !Ref DataKey }
+
+  # ---------------------------------------------------------------- S3
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Project}-assets-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: "aws:kms", KMSMasterKeyID: !GetAtt DataKey.Arn }
+            BucketKeyEnabled: true
+      VersioningConfiguration: { Status: Enabled }
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      LoggingConfiguration: { DestinationBucketName: !Ref LogsBucket, LogFilePrefix: s3-access/assets/ }
+      LifecycleConfiguration:
+        Rules: [{ Id: expire-old-versions, Status: Enabled, NoncurrentVersionExpiration: { NoncurrentDays: 30 } }]
+      Tags: [{ Key: Project, Value: !Ref Project }, { Key: DataClass, Value: product-media }]
+
+  DocsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Project}-docs-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: "aws:kms", KMSMasterKeyID: !GetAtt DataKey.Arn }
+            BucketKeyEnabled: true
+      VersioningConfiguration: { Status: Enabled }
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      LoggingConfiguration: { DestinationBucketName: !Ref LogsBucket, LogFilePrefix: s3-access/docs/ }
+      LifecycleConfiguration:
+        Rules:
+          - Id: invoices-to-ia
+            Status: Enabled
+            Prefix: invoices/
+            Transitions: [{ StorageClass: STANDARD_IA, TransitionInDays: 30 }, { StorageClass: GLACIER_IR, TransitionInDays: 180 }]
+          - Id: backups-to-glacier
+            Status: Enabled
+            Prefix: backups/
+            Transitions: [{ StorageClass: GLACIER, TransitionInDays: 30 }]
+            ExpirationInDays: 400
+          - Id: noncurrent
+            Status: Enabled
+            NoncurrentVersionExpiration: { NoncurrentDays: 90 }
+      Tags: [{ Key: Project, Value: !Ref Project }, { Key: DataClass, Value: invoices-and-backups }]
+
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Project}-logs-${AWS::AccountId}"
+      # ALB access logs only support SSE-S3, so this bucket uses AES-256
+      BucketEncryption: { ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 } }] }
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerPreferred }] }
+      LifecycleConfiguration:
+        Rules: [{ Id: expire-logs, Status: Enabled, ExpirationInDays: 90 }]
+      Tags: [{ Key: Project, Value: !Ref Project }, { Key: DataClass, Value: logs }]
+
+  TrailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Project}-audit-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: "aws:kms", KMSMasterKeyID: !GetAtt DataKey.Arn }
+            BucketKeyEnabled: true
+      VersioningConfiguration: { Status: Enabled }
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      LifecycleConfiguration:
+        Rules: [{ Id: archive-audit, Status: Enabled, Transitions: [{ StorageClass: GLACIER, TransitionInDays: 90 }] }]
+      Tags: [{ Key: Project, Value: !Ref Project }, { Key: DataClass, Value: audit }]
+
+  # Every bucket refuses plain-HTTP requests (encryption in transit)
+  AssetsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AssetsBucket
+      PolicyDocument:
+        Statement:
+          - { Sid: DenyInsecureTransport, Effect: Deny, Principal: "*", Action: "s3:*", Resource: [!GetAtt AssetsBucket.Arn, !Sub "${AssetsBucket.Arn}/*"], Condition: { Bool: { "aws:SecureTransport": false } } }
+  DocsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DocsBucket
+      PolicyDocument:
+        Statement:
+          - { Sid: DenyInsecureTransport, Effect: Deny, Principal: "*", Action: "s3:*", Resource: [!GetAtt DocsBucket.Arn, !Sub "${DocsBucket.Arn}/*"], Condition: { Bool: { "aws:SecureTransport": false } } }
+          - Sid: DenyWrongKmsKey
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub "${DocsBucket.Arn}/*"
+            Condition: { StringNotEqualsIfExists: { "s3:x-amz-server-side-encryption-aws-kms-key-id": !GetAtt DataKey.Arn } }
+  LogsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogsBucket
+      PolicyDocument:
+        Statement:
+          - { Sid: DenyInsecureTransport, Effect: Deny, Principal: "*", Action: "s3:*", Resource: [!GetAtt LogsBucket.Arn, !Sub "${LogsBucket.Arn}/*"], Condition: { Bool: { "aws:SecureTransport": false } } }
+          - Sid: AlbAccessLogs
+            Effect: Allow
+            Principal: { AWS: !Sub ["arn:aws:iam::${Id}:root", { Id: !FindInMap [ElbAccount, !Ref "AWS::Region", Id] }] }
+            Action: s3:PutObject
+            Resource: !Sub "${LogsBucket.Arn}/alb/*"
+          - Sid: AlbAccessLogsService
+            Effect: Allow
+            Principal: { Service: logdelivery.elasticloadbalancing.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub "${LogsBucket.Arn}/alb/*"
+          - Sid: FlowLogsWrite
+            Effect: Allow
+            Principal: { Service: delivery.logs.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub "${LogsBucket.Arn}/vpc-flow-logs/*"
+            Condition: { StringEquals: { "aws:SourceAccount": !Ref "AWS::AccountId" } }
+          - Sid: FlowLogsAcl
+            Effect: Allow
+            Principal: { Service: delivery.logs.amazonaws.com }
+            Action: [s3:GetBucketAcl, s3:ListBucket]
+            Resource: !GetAtt LogsBucket.Arn
+          - Sid: S3ServerAccessLogs
+            Effect: Allow
+            Principal: { Service: logging.s3.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub "${LogsBucket.Arn}/s3-access/*"
+            Condition: { StringEquals: { "aws:SourceAccount": !Ref "AWS::AccountId" } }
+  TrailPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TrailBucket
+      PolicyDocument:
+        Statement:
+          - { Sid: DenyInsecureTransport, Effect: Deny, Principal: "*", Action: "s3:*", Resource: [!GetAtt TrailBucket.Arn, !Sub "${TrailBucket.Arn}/*"], Condition: { Bool: { "aws:SecureTransport": false } } }
+          - Sid: CloudTrailAclCheck
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt TrailBucket.Arn
+          - Sid: CloudTrailWrite
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub "${TrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+          - Sid: DenyAuditLogDeletion
+            Effect: Deny
+            Principal: "*"
+            Action: [s3:DeleteObject, s3:DeleteObjectVersion]
+            Resource: !Sub "${TrailBucket.Arn}/AWSLogs/*"
+            Condition: { StringNotLike: { "aws:PrincipalArn": [!Sub "arn:aws:iam::${AWS::AccountId}:role/LabRole", !Sub "arn:aws:iam::${AWS::AccountId}:role/voclabs"] } }
+
+  # ---------------------------------------------------------------- CloudTrail
+  Trail:
+    Type: AWS::CloudTrail::Trail
+    Condition: Trail
+    DependsOn: TrailPolicy
+    Properties:
+      TrailName: !Sub "${Project}-audit-trail"
+      S3BucketName: !Ref TrailBucket
+      IsLogging: true
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+      KMSKeyId: !GetAtt DataKey.Arn
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+          DataResources:
+            - Type: AWS::S3::Object
+              Values: [!Sub "${DocsBucket.Arn}/invoices/"]   # data events: who read/wrote invoices
+      Tags: [{ Key: Project, Value: !Ref Project }]
+
+  # ---------------------------------------------------------------- EBS encryption by default (custom resource)
+  EbsDefaultFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Project}-ebs-default-encryption"
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      Role: !Ref LabRoleArn
+      Code:
+        ZipFile: |
+          import json, urllib.request, boto3
+          def send(e, c, status, data, reason=""):
+              body = json.dumps({"Status": status, "Reason": reason or "see CloudWatch Logs", "PhysicalResourceId": "ebs-default-encryption",
+                                 "StackId": e["StackId"], "RequestId": e["RequestId"], "LogicalResourceId": e["LogicalResourceId"], "Data": data}).encode()
+              urllib.request.urlopen(urllib.request.Request(e["ResponseURL"], data=body, method="PUT", headers={"Content-Type": ""}))
+          def handler(e, c):
+              ec2 = boto3.client("ec2"); data = {}
+              try:
+                  if e["RequestType"] in ("Create", "Update"):
+                      ec2.enable_ebs_encryption_by_default()
+                      ec2.modify_ebs_default_kms_key_id(KmsKeyId=e["ResourceProperties"]["KeyArn"])
+                      data["Enabled"] = "true"
+                  else:  # never leave the account pointing at a key that is being deleted
+                      ec2.reset_ebs_default_kms_key_id()
+                  send(e, c, "SUCCESS", data)
+              except Exception as ex:
+                  print(ex)  # lab accounts may deny this; launch templates still request encrypted volumes explicitly
+                  send(e, c, "SUCCESS", {"Enabled": "false"}, str(ex)[:200])
+  EbsDefaultEncryption:
+    Type: Custom::EbsDefaultEncryption
+    Properties: { ServiceToken: !GetAtt EbsDefaultFn.Arn, KeyArn: !GetAtt DataKey.Arn }
+
+Outputs:
+  KeyArn: { Value: !GetAtt DataKey.Arn }
+  KeyId: { Value: !Ref DataKey }
+  AssetsBucket: { Value: !Ref AssetsBucket }
+  AssetsBucketArn: { Value: !GetAtt AssetsBucket.Arn }
+  DocsBucket: { Value: !Ref DocsBucket }
+  DocsBucketArn: { Value: !GetAtt DocsBucket.Arn }
+  LogsBucket: { Value: !Ref LogsBucket }
+  LogsBucketArn: { Value: !GetAtt LogsBucket.Arn }
+  TrailBucket: { Value: !Ref TrailBucket }
+  TrailArn: { Value: !If [Trail, !GetAtt Trail.Arn, "disabled"] }
+  EbsDefaultEncryption: { Value: !GetAtt EbsDefaultEncryption.Enabled }

@@ -1,0 +1,34 @@
+{% extends "console_base.html" %}
+{% block body %}
+<div class="page-h"><div><span class="eyebrow">Factory Intelligence</span><h1>Machine telemetry</h1>
+  <p>Latest reading per machine from the <span class="mono">telemetry</span> table (POST /api/telemetry). Trend lines use only readings actually stored in the last 7 days.</p></div>
+  <span class="badge" id="fl-sum"><span class="dot info"></span>loading</span></div>
+<div class="machines" id="m"><div class="card"><div class="card-b"><div class="sk" style="height:200px"></div></div></div></div>
+<section class="card mt"><div class="card-h"><h3>Thresholds</h3><span class="eyebrow">rules applied by the platform</span></div>
+  <div class="card-b" style="display:flex;gap:10px;flex-wrap:wrap"><span class="badge normal">NORMAL ≤ 75 °C</span><span class="badge warning">WARNING 75–90 °C</span><span class="badge critical">CRITICAL &gt; 90 °C or any fault code → SNS maintenance alert</span></div></section>
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const ok = x => x && x.state === "ok";
+  const gauge = (v, st) => { const a = Math.min(Math.max(v, 0), 120) / 120 * Math.PI, x = 85 - 70 * Math.cos(a), y = 92 - 70 * Math.sin(a), col = st === "critical" ? "#FF4D67" : st === "warning" ? "#FFB800" : "#22C55E";
+    return `<svg class="gauge" viewBox="0 0 170 104" aria-hidden="true"><path d="M15 92A70 70 0 0 1 155 92" fill="none" stroke="rgba(148,163,184,.15)" stroke-width="12" stroke-linecap="round"/>
+      <path d="M15 92A70 70 0 0 1 ${x.toFixed(1)} ${y.toFixed(1)}" fill="none" stroke="${col}" stroke-width="12" stroke-linecap="round"/>
+      <text x="85" y="84" text-anchor="middle" fill="#F5F8FF" font-size="26" font-weight="700">${v}°</text><text x="85" y="100" text-anchor="middle" fill="#94A3B8" font-size="9">CELSIUS · 0–120</text></svg>`; };
+  async function load() {
+    const t = await NX.get("/api/ops/telemetry"); NX.stamp();
+    const box = document.getElementById("m"), sum = document.getElementById("fl-sum");
+    if (!ok(t)) { box.innerHTML = '<div class="card empty" style="grid-column:1/-1">Telemetry unavailable</div>'; return; }
+    if (!t.machines.length) { box.innerHTML = '<div class="card empty" style="grid-column:1/-1">No machine has reported telemetry yet.</div>'; sum.innerHTML = '<span class="dot info"></span>0 machines'; return; }
+    const crit = t.machines.filter(m => m.status === "critical").length, warn = t.machines.filter(m => m.status === "warning").length;
+    sum.className = "badge " + (crit ? "bad" : warn ? "warn" : "ok"); sum.innerHTML = `<span class="dot ${crit ? "bad" : warn ? "warn" : "ok"}"></span>${t.machines.length} machines · ${crit} critical · ${warn} warning`;
+    box.innerHTML = t.machines.map(m => `<div class="card glow machine ${m.status}"><div style="display:flex;justify-content:space-between;width:100%"><b class="mono">${NX.esc(m.machine_id)}</b><span class="badge ${m.status}">${NX.esc(m.fault_code || m.status.toUpperCase())}</span></div>
+      ${gauge(Number(m.temperature), m.status)}
+      <div style="display:flex;justify-content:space-between;width:100%;font-size:12px" class="muted"><span>${NX.num(m.run_hours)} run-hours</span><span>${NX.ago(m.ts)}</span></div>
+      <div style="width:100%" data-spark="${NX.esc(m.machine_id)}"></div><div class="dim mono" style="font-size:10.5px">${m.readings} stored reading(s) · 7 days</div></div>`).join("");
+    box.querySelectorAll("[data-spark]").forEach(el => { const m = t.machines.find(x => x.machine_id === el.dataset.spark); NX.spark(el, t.series[el.dataset.spark], m.status === "critical" ? "#FF4D67" : "#00D9FF"); });
+  }
+  NX.poll(load, 15000);
+})();
+</script>
+{% endblock %}

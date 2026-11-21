@@ -1,0 +1,5 @@
+{% extends "portal_base.html" %}{% block head %}<meta http-equiv="refresh" content="8">{% endblock %}{% block body %}
+<div class="card" style="max-width:680px;margin:40px auto;padding:36px">
+<span class="badge info"><span class="dot info"></span>CONNECTING</span><h1 style="font-size:30px;margin:14px 0 10px">Connecting to the orders database…</h1>
+<p class="muted">This web instance is establishing its encrypted connection to Amazon RDS. The page refreshes automatically every 8 seconds.</p>
+<p class="mono dim" style="font-size:12px">{{ (err or '')[:240] }}</p></div>{% endblock %}

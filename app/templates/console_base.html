@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en" data-logo="{{ url_for('static', filename='brand/syed-logo.webp') }}" data-region="{{ region }}"><head>{% include "_head.html" %}
+<title>{{ title }} · SYED FORGE</title>
+{% block head %}{% endblock %}</head>
+<body>
+<a href="#main" class="sr">Skip to content</a>
+{% set icons = {'mission':'grid','architecture':'arch','fulfilment':'flow','compute':'cpu','factory':'factory','inventory':'box','security':'shield','health':'pulse'} %}
+<div class="shell">
+  <aside class="side" aria-label="Operations navigation">
+    {% with href="/ops", sub="OPERATIONS CONSOLE" %}{% include "_brand.html" %}{% endwith %}
+    <nav>
+      <div class="grp">COMMAND</div>
+      {% for key, label, href in pages %}
+        {% if key == 'fulfilment' %}<div class="grp">OPERATIONS</div>{% endif %}
+        {% if key == 'security' %}<div class="grp">GOVERNANCE</div>{% endif %}
+        <a href="{{ href }}" class="{{ 'on' if key == page }}" {% if key == page %}aria-current="page"{% endif %} title="{{ label }}"><span data-icon="{{ icons[key] }}"></span><span class="lbl">{{ label }}</span></a>
+      {% endfor %}
+      <div class="grp">CUSTOMER</div>
+      <a href="/" title="Customer portal"><span data-icon="store"></span><span class="lbl">Customer Portal</span></a>
+    </nav>
+    <div class="foot"><span class="lbl">{{ env_name }} · {{ region }}</span>
+      <button class="btn sm ghost collapse-btn" data-collapse aria-label="Collapse sidebar"><span data-icon="chev" data-size="16"></span><span class="lbl">Collapse</span></button></div>
+  </aside>
+  <div style="min-width:0">
+    <header class="topbar">
+      <button class="btn sm ghost menu-btn" data-menu aria-label="Open navigation"><span data-icon="menu"></span></button>
+      <div class="crumbs"><span class="crumb-pre">SYED FORGE <span class="dim">/</span> Operations <span class="dim">/</span> </span><b>{{ title }}</b></div>
+      <div class="right">
+        <span class="pill" id="conn-pill"><span class="dot info"></span>Connecting…</span>
+        <span class="pill pill-xl">REGION <b style="color:var(--text)">{{ region }}</b></span>
+        <span class="pill pill-xl">ENV <b style="color:var(--text)">{{ env_name }}</b></span>
+        <span class="pill">REFRESHED <b id="refresh-ts" style="color:var(--text)">—</b></span>
+        <span class="anchor"><button class="tb-btn" data-pop="al-pop" aria-label="Notifications" aria-expanded="false" aria-haspopup="true"><span data-icon="bell" data-size="17"></span><span class="cnt" id="al-cnt" hidden>0</span></button>
+          <div class="pop" id="al-pop" role="menu"><div class="ph"><b>Notifications</b><span class="eyebrow">from live checks</span></div><div id="al-list"><div class="sk" style="height:80px"></div></div></div></span>
+        <span class="anchor"><button class="acct" data-pop="ac-pop" aria-label="Account menu" aria-expanded="false" aria-haspopup="true"><span class="av">SM</span><span class="nm">Syed Measum Shah</span></button>
+          <div class="pop" id="ac-pop" role="menu" style="width:280px"><div class="ph"><span><b>Syed Measum Shah</b><br><span class="dim mono" style="font-size:11px">SYED FORGE · AWS us-east-1</span></span></div>
+            <a class="mi" href="/"><span data-icon="store" data-size="16"></span>Customer portal</a>
+            <a class="mi" href="/ops/architecture"><span data-icon="arch" data-size="16"></span>Architecture explorer</a>
+            <button class="mi" data-replay-intro><span data-icon="bolt" data-size="16"></span>Replay intro</button>
+            <button class="mi" data-collapse><span data-icon="chev" data-size="16"></span>Toggle sidebar</button></div></span>
+      </div>
+    </header>
+    <main id="main" class="main">
+      <div class="banner" id="conn-banner" role="alert"><span class="dot bad"></span><div><b>Backend temporarily unavailable.</b> SYED FORGE could not reach the MegaFab API — if the AWS Academy lab session has ended, start the lab again. Figures below are the last values received<span id="last-ok"></span> and are not live.</div></div>
+      {% block body %}{% endblock %}
+    </main>
+  </div>
+</div>
+<script src="{{ url_for('static', filename='nexus.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='forge.js') }}?v=3"></script>
+{% block scripts %}{% endblock %}
+</body></html>

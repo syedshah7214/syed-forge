@@ -1,0 +1,77 @@
+{% extends "console_base.html" %}
+{% block body %}
+<div class="page-h"><div><span class="eyebrow">Order Fulfilment Monitor</span><h1>Orders, queues &amp; workflows</h1>
+  <p>Every order is enqueued in SQS, orchestrated by an SWF workflow and executed by EC2 workers. All values below are live.</p></div></div>
+<div class="kpis">
+  <div class="card glow kpi amber"><span class="ic" data-icon="queue" data-size="16"></span><span class="eyebrow">SQS waiting</span><div class="v" id="q-w">—</div><div class="s" id="q-w-s">&nbsp;</div></div>
+  <div class="card glow kpi red"><span class="ic" data-icon="bolt" data-size="16"></span><span class="eyebrow">Dead-letter queue</span><div class="v" id="q-d">—</div><div class="s">failed 5 times — needs redrive</div></div>
+  <div class="card glow kpi"><span class="ic" data-icon="flow" data-size="16"></span><span class="eyebrow">SWF workflows (24 h)</span><div class="v" id="w-o">—</div><div class="s" id="w-o-s">&nbsp;</div></div>
+  <div class="card glow kpi green"><span class="ic" data-icon="workers" data-size="16"></span><span class="eyebrow">Worker heartbeats</span><div class="v" id="w-h">—</div><div class="s">reported within 90 s</div></div>
+</div>
+<div class="cols-3 mt">
+  <section class="card"><div class="card-h"><h3>Orders</h3>
+      <select class="input" id="flt" style="width:auto;height:34px" aria-label="Filter by status"><option value="">All statuses</option>
+      {% for s in ['RECEIVED','QUEUED','WORKFLOW_STARTED','VALIDATED','STOCK_RESERVED','INVOICED','SHIPPED','COMPLETED','REJECTED'] %}<option>{{ s }}</option>{% endfor %}</select></div>
+    <div class="card-b tbl-wrap"><table class="table"><thead><tr><th>#</th><th>Company</th><th>Status</th><th>Priority</th><th class="num">Total</th><th>Carrier</th><th>Worker</th><th class="num">Cycle</th><th>Placed</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="9"><div class="sk" style="height:200px"></div></td></tr></tbody></table></div></section>
+  <div class="grid" style="gap:16px;align-content:start">
+    <section class="card"><div class="card-h"><h3>Status distribution</h3></div>
+      <div class="card-b" style="display:flex;gap:18px;align-items:center"><div id="donut"></div><div id="legend" style="font-size:12.5px;display:grid;gap:6px"></div></div></section>
+    <section class="card"><div class="card-h"><h3>Processing statistics</h3><span class="eyebrow">last 60 orders</span></div>
+      <div class="card-b" id="pstats"><div class="sk" style="height:70px"></div></div></section>
+    <section class="card"><div class="card-h"><h3>Low-stock inventory</h3><a class="btn sm ghost" href="/ops/inventory">All →</a></div>
+      <div class="card-b" id="lowstock"><div class="sk" style="height:70px"></div></div></section>
+    <section class="card"><div class="card-h"><h3>Workers</h3><span class="eyebrow">heartbeat table</span></div>
+      <div class="card-b" id="wk"><div class="sk" style="height:90px"></div></div></section>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const ok = x => x && x.state === "ok", $ = id => document.getElementById(id);
+  const COL = {COMPLETED:"#22C55E",REJECTED:"#FF4D67",FAILED:"#FF4D67",SHIPPED:"#00D9FF",INVOICED:"#38BDF8",STOCK_RESERVED:"#A78BFA",VALIDATED:"#C084FC",WORKFLOW_STARTED:"#FFB800",QUEUED:"#F59E0B",RECEIVED:"#94A3B8"};
+  async function top() {
+    const s = await NX.get("/api/ops/summary"); NX.stamp();
+    if (ok(s.queues)) { $("q-w").textContent = s.queues.orders.waiting; $("q-w-s").textContent = `${s.queues.orders.inflight} in flight (being processed)`; $("q-d").textContent = s.queues.dlq.waiting; }
+    else { $("q-w-s").textContent = "SQS unavailable"; }
+    if (ok(s.workflows)) { $("w-o").textContent = s.workflows.open; $("w-o-s").textContent = `open · ${s.workflows.closed} closed · ${s.workflows.domain}`; } else $("w-o-s").textContent = "SWF unavailable";
+    if (ok(s.db)) {
+      const parts = s.db.by_status.map(r => ({k: r.status, v: r.n, c: COL[r.status] || "#94A3B8"}));
+      NX.donut($("donut"), parts, "Order status distribution");
+      $("legend").innerHTML = parts.map(p => `<span><i style="display:inline-block;width:9px;height:9px;border-radius:3px;background:${p.c};margin-right:8px"></i>${p.k} <b class="mono">${p.v}</b></span>`).join("") || '<span class="muted">No orders yet</span>';
+    }
+    const w = s.workers;
+    if (ok(w)) {
+      $("w-h").textContent = w.healthy;
+      $("wk").innerHTML = w.items.length ? `<table class="table"><thead><tr><th>Instance</th><th>AZ</th><th class="num">Done</th><th>Last seen</th></tr></thead><tbody>${w.items.map(r =>
+        `<tr><td class="mono" style="font-size:11.5px">${NX.esc(r.instance_id)}</td><td class="mono">${NX.esc(r.az || "")}</td><td class="num">${r.processed}</td><td><span class="badge ${r.state}">${r.age}s ago</span></td></tr>`).join("")}</tbody></table>`
+        : '<div class="empty">No worker has reported a heartbeat yet.</div>';
+    } else $("wk").innerHTML = '<div class="empty">Worker heartbeats unavailable</div>';
+  }
+  async function rows() {
+    const st = $("flt").value, o = await NX.get("/api/ops/orders?limit=60" + (st ? "&status=" + st : ""));
+    $("rows").innerHTML = ok(o) && o.items.length ? o.items.map(r => `<tr><td><a href="/orders/${r.id}">#${r.id}</a></td><td>${NX.esc(r.company)}</td><td><span class="badge ${r.status}">${r.status}</span></td>
+      <td>${r.priority === "EXPRESS" ? '<span class="badge warn">EXPRESS</span>' : '<span class="dim">standard</span>'}</td><td class="num">${NX.pkr(r.total)}</td>
+      <td class="mono" style="font-size:11.5px">${NX.esc(r.carrier || "—")}${r.tracking_no ? "<br><span class=dim>" + NX.esc(r.tracking_no) + "</span>" : ""}</td>
+      <td class="mono dim" style="font-size:11px">${NX.esc(r.served_by || "")}</td><td class="num mono">${r.status === "COMPLETED" ? r.secs + " s" : "—"}</td><td class="dim" style="font-size:12px">${NX.ago(r.created_at)}</td></tr>`).join("")
+      : `<tr><td colspan="9" class="empty">${ok(o) ? "No orders match this filter." : "Orders unavailable"}</td></tr>`;
+  }
+  async function stats() {
+    const o = await NX.get("/api/ops/orders?limit=60"), inv = await NX.get("/api/ops/inventory");
+    if (ok(o)) {
+      const done = o.items.filter(r => r.status === "COMPLETED"), secs = done.map(r => +r.secs).filter(x => x >= 0).sort((a, b) => a - b);
+      const avg = secs.length ? secs.reduce((a, b) => a + b, 0) / secs.length : null, p = k => secs.length ? secs[Math.min(secs.length - 1, Math.floor(secs.length * k))] : null;
+      const kv = (l, v) => `<div><span class="eyebrow">${l}</span><div class="mono" style="font-size:20px;font-weight:600;margin-top:6px">${v}</div></div>`;
+      $("pstats").innerHTML = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">${kv("Completed", done.length + " / " + o.items.length)}${kv("Avg cycle", avg == null ? "—" : avg.toFixed(1) + " s")}${kv("Median", p(.5) == null ? "—" : p(.5) + " s")}${kv("Express share", o.items.length ? Math.round(o.items.filter(r => r.priority === "EXPRESS").length / o.items.length * 100) + " %" : "—")}</div>
+        <p class="dim mono" style="font-size:10.5px;margin:12px 0 0">cycle = order placed → last status update · computed from RDS rows</p>`;
+    } else $("pstats").innerHTML = '<div class="empty">Unavailable</div>';
+    if (ok(inv)) { const low = inv.items.filter(r => r.state !== "healthy").sort((a, b) => a.stock / Math.max(1, a.reorder_level) - b.stock / Math.max(1, b.reorder_level));
+      $("lowstock").innerHTML = low.length ? low.slice(0, 6).map(r => `<div style="display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid var(--line);font-size:13px"><span><b class="mono" style="font-size:11.5px">${NX.esc(r.sku)}</b> ${NX.esc(r.name)}</span><span class="badge ${r.state}">${NX.num(r.stock)} / ${NX.num(r.reorder_level)}</span></div>`).join("") : '<div class="empty">All products above re-order level.</div>';
+    } else $("lowstock").innerHTML = '<div class="empty">Unavailable</div>';
+  }
+  $("flt").addEventListener("change", rows); NX.poll(stats, 20000);
+  NX.poll(top, 10000); NX.poll(rows, 10000);
+})();
+</script>
+{% endblock %}

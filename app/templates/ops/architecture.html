@@ -1,0 +1,34 @@
+{% extends "console_base.html" %}
+{% block body %}
+<div class="page-h">
+  <div><span class="eyebrow">Architecture Explorer</span><h1>The MegaFab platform on AWS — as deployed</h1>
+    <p>Drag to pan, scroll to zoom, click any service for its purpose, configuration, relationships and — where the app can read it — live status. Badges on nodes are live; moving packets are a simulation.</p></div>
+</div>
+<div class="arch-wrap" id="arch">
+  <div class="arch-tools">
+    <button class="btn sm" data-flow="request"><span data-icon="store" data-size="15"></span>Customer request</button>
+    <button class="btn sm" data-flow="order"><span data-icon="flow" data-size="15"></span>Order processing</button>
+    <button class="btn sm" data-flow="admin"><span data-icon="shield" data-size="15"></span>Admin access</button>
+    <button class="btn sm" id="f-az"><span data-icon="bolt" data-size="15"></span>Simulate AZ failure</button>
+    <button class="btn sm ghost" id="f-stop">Clear</button>
+    <span class="sep"></span>
+    <button class="btn sm ghost" id="z-in" aria-label="Zoom in">+</button><button class="btn sm ghost" id="z-out" aria-label="Zoom out">−</button><button class="btn sm ghost" id="z-fit">Fit</button>
+  </div>
+  <div class="arch-layers" role="toolbar" aria-label="Architecture layers">
+    <button class="on" data-layer="all">All layers</button><button data-layer="network">Network</button><button data-layer="compute">Compute</button>
+    <button data-layer="data">Data</button><button data-layer="integration">Messaging</button><button data-layer="security">Security &amp; ops</button></div>
+  <span class="badge warn sim-label" id="sim" hidden><span class="dot warn"></span>SIMULATION · <b></b> · educational visualization, not live AWS events</span>
+  <div class="arch-legend"><span style="color:#FFB800">■ compute</span><span style="color:#A78BFA">■ network</span><span style="color:#C084FC">■ database</span><span style="color:#F472B6">■ integration</span><span style="color:#22C55E">■ storage</span><span style="color:#00D9FF">■ security</span><span>green text = live metric</span></div>
+</div>
+<div class="cols-2 mt">
+  <section class="card"><div class="card-h"><h3>Auto Scaling capacity — configured vs actual</h3><span class="eyebrow">live · EC2 Auto Scaling</span></div>
+    <div class="card-b" id="capacity"><div class="sk" style="height:90px"></div></div></section>
+  <section class="card"><div class="card-h"><h3>How Multi-AZ keeps orders flowing</h3><span class="eyebrow">design</span></div>
+    <div class="card-b" style="font-size:14px;color:var(--muted)">
+      <p style="margin:0 0 10px">Every tier exists in <b style="color:var(--text)">us-east-1a and us-east-1b</b>. If one zone fails, the load balancer stops sending traffic there, the RDS standby is promoted automatically (≈1–2 min, no data loss) and both Auto Scaling groups launch replacements in the healthy zone.</p>
+      <p style="margin:0">Orders already in <b style="color:var(--text)">SQS</b> wait safely; <b style="color:var(--text)">SWF</b> re-schedules any step whose worker disappeared. Press <i>Simulate AZ failure</i> above to see the paths that keep working.</p></div></section>
+</div>
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-hidden="true"><div class="drawer-h"><span class="eyebrow" id="d-kind">SERVICE</span><button class="x" id="d-close" aria-label="Close">×</button></div><div class="drawer-b" id="d-body"></div></aside>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='arch.js') }}?v=2"></script>{% endblock %}

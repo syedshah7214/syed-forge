@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" data-logo="{{ url_for('static', filename='brand/syed-logo.webp') }}" data-region="{{ region }}"><head>{% include "_head.html" %}
+<title>{% block title %}SYED FORGE · Industrial Cloud & Supply Intelligence{% endblock %}</title>
+<meta name="description" content="SYED FORGE — Industrial Cloud & Supply Intelligence. B2B industrial supply ordering for MegaFab, powered by AWS.">
+{% block head %}{% endblock %}</head>
+<body>
+<a href="#main" class="sr">Skip to content</a>
+<header class="p-top"><div class="in">
+  {% with href="/", sub="MEGAFAB INDUSTRIAL SUPPLY" %}{% include "_brand.html" %}{% endwith %}
+  <nav class="p-nav" aria-label="Customer portal">
+    <a href="/#overview" class="{{ 'on' if request.path == '/' }}">Overview</a>
+    <a href="/#catalogue">Industrial Catalogue</a>
+    <a href="/#bulk" data-bulk>Bulk Order</a>
+    <a href="/track" class="{{ 'on' if request.path.startswith('/track') or request.path.startswith('/orders') }}">Order Tracking</a>
+    <a href="/track#invoice">Invoice &amp; Shipping</a>
+  </nav>
+  <a class="btn sm ghost ops-link" href="/ops"><span data-icon="grid" data-size="15"></span>Operations Console</a>
+  <span class="node-chip" title="The Application Load Balancer routed this request to this EC2 instance"><span class="dot ok"></span>{{ instance_id }} · {{ az }}</span>
+</div></header>
+<main id="main" class="p-main">{% block body %}{% endblock %}</main>
+<footer class="p-foot">{% with href="/", sub="ENGINEERED FOR INDUSTRY. POWERED BY AWS." %}{% include "_brand.html" %}{% endwith %}
+  <span>MegaFab Industrial Supply · Elastic Beanstalk · Auto Scaling · RDS Multi-AZ · SQS → SWF → SNS · S3 · KMS</span>
+  <span>{{ region }} · Built by Syed Measum Shah · <a href="#" data-replay-intro>Replay intro</a></span></footer>
+<script src="{{ url_for('static', filename='nexus.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='forge.js') }}?v=3"></script>
+{% block scripts %}{% endblock %}
+</body></html>

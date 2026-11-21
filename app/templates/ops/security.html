@@ -1,0 +1,26 @@
+{% extends "console_base.html" %}
+{% block body %}
+<div class="page-h"><div><span class="eyebrow">Security &amp; Audit</span><h1>Security posture</h1>
+  <p><b style="color:var(--green)">Verified</b> controls were checked just now through read-only AWS API calls. <b style="color:var(--cyan)">Configured</b> controls are defined in CloudFormation but not re-checked from the app. No secrets, keys or account identifiers are shown.</p></div>
+  <span class="badge" id="sec-sum"><span class="dot info"></span>checking</span></div>
+<section class="card"><div class="card-h"><h3>Actively verified controls</h3><span class="eyebrow">live · cached 60 s</span></div>
+  <div class="card-b tbl-wrap"><table class="table"><thead><tr><th>Area</th><th>Control</th><th>Result</th><th>Evidence</th></tr></thead><tbody id="chk"><tr><td colspan="4"><div class="sk" style="height:200px"></div></td></tr></tbody></table></div></section>
+<section class="card mt"><div class="card-h"><h3>Configured controls</h3><span class="eyebrow">infrastructure as code · not live-verified</span></div>
+  <div class="card-b tbl-wrap"><table class="table"><thead><tr><th>Area</th><th>Control</th><th>Defined in</th><th>Status</th></tr></thead><tbody id="cfg"></tbody></table></div></section>
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  async function load() {
+    const s = await NX.get("/api/ops/security"); NX.stamp();
+    const sum = document.getElementById("sec-sum");
+    if (!s || s.state !== "ok") { document.getElementById("chk").innerHTML = '<tr><td colspan="4" class="empty">Security checks unavailable</td></tr>'; sum.className = "badge info"; sum.textContent = "UNAVAILABLE"; return; }
+    const v = s.checks.filter(c => c.state === "verified").length, a = s.checks.filter(c => c.state === "attention").length;
+    sum.className = "badge " + (a ? "warn" : "ok"); sum.innerHTML = `<span class="dot ${a ? "warn" : "ok"}"></span>${v}/${s.checks.length} VERIFIED${a ? " · " + a + " NEED ATTENTION" : ""}`;
+    document.getElementById("chk").innerHTML = s.checks.map(c => `<tr><td><span class="eyebrow">${NX.esc(c.area)}</span></td><td><b>${NX.esc(c.control)}</b></td><td><span class="badge ${c.state}">${c.state}</span></td><td class="mono" style="font-size:11.5px;color:var(--muted)">${NX.esc(c.detail)}</td></tr>`).join("");
+    document.getElementById("cfg").innerHTML = s.configured.map(c => `<tr><td><span class="eyebrow">${NX.esc(c.area)}</span></td><td>${NX.esc(c.control)}</td><td class="mono" style="font-size:11.5px">${NX.esc(c.where)}</td><td><span class="badge info">configured</span></td></tr>`).join("");
+  }
+  NX.poll(load, 60000);
+})();
+</script>
+{% endblock %}

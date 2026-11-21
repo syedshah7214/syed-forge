@@ -1,0 +1,34 @@
+{% extends "console_base.html" %}
+{% block body %}
+<div class="page-h"><div><span class="eyebrow">Inventory Analytics</span><h1>Stock &amp; revenue</h1>
+  <p>Stock levels, re-order alerts and sales computed from <span class="mono">products</span> and <span class="mono">order_lines</span> in RDS.</p></div></div>
+<div class="kpis" id="ik"></div>
+<div class="cols-3 mt">
+  <section class="card"><div class="card-h"><h3>Stock vs re-order level</h3><span class="eyebrow">bar = stock · tick = re-order point</span></div>
+    <div class="card-b tbl-wrap"><table class="table"><thead><tr><th>SKU</th><th>Product</th><th style="width:34%">Stock</th><th>State</th><th class="num">Sold</th><th class="num">Revenue</th></tr></thead><tbody id="items"><tr><td colspan="6"><div class="sk" style="height:220px"></div></td></tr></tbody></table></div></section>
+  <section class="card"><div class="card-h"><h3>Revenue by category</h3></div><div class="card-b" id="cats"><div class="sk" style="height:200px"></div></div></section>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const ok = x => x && x.state === "ok";
+  async function load() {
+    const d = await NX.get("/api/ops/inventory"); NX.stamp();
+    if (!ok(d)) { document.getElementById("items").innerHTML = '<tr><td colspan="6" class="empty">Inventory unavailable</td></tr>'; return; }
+    const it = d.items, rev = it.reduce((a, r) => a + r.revenue, 0), units = it.reduce((a, r) => a + r.sold, 0), sv = it.reduce((a, r) => a + r.stock * r.price, 0), low = it.filter(r => r.state === "reorder").length;
+    const k = (l, v, s, c = "") => `<div class="card glow kpi ${c}"><span class="eyebrow">${l}</span><div class="v">${v}</div><div class="s">${s}</div></div>`;
+    document.getElementById("ik").innerHTML = k("Products", it.length, "active SKUs") + k("Units sold", NX.num(units), "all orders", "amber") + k("Sales revenue", NX.pkr(rev), "order lines · excl. tax", "green") + k("Re-order alerts", low, `stock value ${NX.pkr(sv)}`, low ? "red" : "");
+    document.getElementById("items").innerHTML = it.map(r => { const mx = Math.max(r.stock, r.reorder_level * 3, 1);
+      return `<tr><td class="mono" style="font-size:11.5px">${NX.esc(r.sku)}</td><td>${NX.esc(r.name)}<div class="dim" style="font-size:11.5px">${NX.esc(r.category)}</div></td>
+      <td><div style="position:relative;height:10px;border-radius:5px;background:rgba(148,163,184,.12)"><i style="position:absolute;inset:0 auto 0 0;border-radius:5px;width:${r.stock / mx * 100}%;background:${r.state === "reorder" ? "var(--red)" : r.state === "watch" ? "var(--amber)" : "var(--green)"}"></i>
+      <span style="position:absolute;top:-3px;bottom:-3px;left:${r.reorder_level / mx * 100}%;border-left:2px solid #F5F8FF"></span></div><div class="mono dim" style="font-size:10.5px;margin-top:3px">${NX.num(r.stock)} ${NX.esc(r.unit)} · re-order at ${NX.num(r.reorder_level)}</div></td>
+      <td><span class="badge ${r.state}">${r.state}</span></td><td class="num">${NX.num(r.sold)}</td><td class="num">${NX.pkr(r.revenue)}</td></tr>`; }).join("") || '<tr><td colspan="6" class="empty">No products</td></tr>';
+    const mxc = Math.max(...d.categories.map(c => c.revenue), 1);
+    document.getElementById("cats").innerHTML = d.categories.map(c => `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:13px"><b>${NX.esc(c.category)}</b><span class="mono">${NX.pkr(c.revenue)}</span></div>
+      <div class="bar amber" style="margin-top:6px"><i style="width:${c.revenue / mxc * 100}%"></i></div><div class="dim mono" style="font-size:10.5px;margin-top:3px">${NX.num(c.units)} units sold · stock value ${NX.pkr(c.stock_value)}</div></div>`).join("") || '<div class="empty">No categories</div>';
+  }
+  NX.poll(load, 30000);
+})();
+</script>
+{% endblock %}

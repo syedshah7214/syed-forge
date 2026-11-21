@@ -1,0 +1,321 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MegaFab 05 - Compute. (a) Web tier on Elastic Beanstalk: Application Load Balancer in
+  public subnets, EC2 Auto Scaling group (2-6 instances) in private subnets across 2 AZs.
+  (b) Fulfilment tier: EC2 instances launched from the Amazon Linux 2023 AMI via a launch
+  template with KMS-encrypted EBS root + data volumes, scaled on SQS queue depth.
+  (c) Management bastion in the peered management VPC.
+
+Parameters:
+  Project: { Type: String, Default: megafab }
+  SolutionStack: { Type: String, Default: "64bit Amazon Linux 2023 v4.14.4 running Python 3.12" }
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  InstanceType: { Type: String, Default: t3.micro }
+  KeyName: { Type: String, Default: vockey }
+  InstanceProfile: { Type: String, Default: LabInstanceProfile }
+  ServiceRoleArn: { Type: String }
+  AppVpcId: { Type: String }
+  PublicSubnets: { Type: String }
+  AppSubnets: { Type: CommaDelimitedList }
+  MgmtSubnet: { Type: String }
+  AlbSg: { Type: String }
+  WebSg: { Type: String }
+  WorkerSg: { Type: String }
+  BastionSg: { Type: String }
+  KeyArn: { Type: String }
+  ArtifactBucket: { Type: String }
+  AppBundleKey: { Type: String }
+  WorkerBundleKey: { Type: String }
+  CertificateArn: { Type: String, Default: "", Description: ACM certificate for the HTTPS listener (optional) }
+  LogsBucket: { Type: String }
+  AssetsBucket: { Type: String }
+  DocsBucket: { Type: String }
+  DbEndpoint: { Type: String }
+  DbSecretArn: { Type: String }
+  OrdersQueueUrl: { Type: String }
+  OrdersQueueName: { Type: String }
+  DlqUrl: { Type: String }
+  TopicArn: { Type: String }
+  SwfDomain: { Type: String }
+  WebMin: { Type: Number, Default: 2 }
+  WebMax: { Type: Number, Default: 6 }
+
+Conditions:
+  Https: !Not [!Equals [!Ref CertificateArn, ""]]
+
+Resources:
+  # ================================================================ (a) WEB TIER - Elastic Beanstalk
+  EbApp:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: !Sub "${Project}-portal"
+      Description: MegaFab B2B customer portal
+  EbVersion:
+    Type: AWS::ElasticBeanstalk::ApplicationVersion
+    Properties:
+      ApplicationName: !Ref EbApp
+      Description: !Sub "Bundle ${AppBundleKey}"
+      SourceBundle: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref AppBundleKey }
+  EbEnv:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref EbApp
+      EnvironmentName: !Sub "${Project}-prod"
+      CNAMEPrefix: !Sub "${Project}-macloud-${AWS::AccountId}"
+      SolutionStackName: !Ref SolutionStack
+      VersionLabel: !Ref EbVersion
+      Tier: { Name: WebServer, Type: Standard }
+      Tags: [{ Key: Project, Value: !Ref Project }, { Key: Tier, Value: web }]
+      OptionSettings:
+        - { Namespace: "aws:elasticbeanstalk:environment", OptionName: EnvironmentType, Value: LoadBalanced }
+        - { Namespace: "aws:elasticbeanstalk:environment", OptionName: LoadBalancerType, Value: application }
+        - { Namespace: "aws:elasticbeanstalk:environment", OptionName: ServiceRole, Value: !Ref ServiceRoleArn }
+        - { Namespace: "aws:ec2:vpc", OptionName: VPCId, Value: !Ref AppVpcId }
+        - { Namespace: "aws:ec2:vpc", OptionName: Subnets, Value: !Join [",", !Ref AppSubnets] }
+        - { Namespace: "aws:ec2:vpc", OptionName: ELBSubnets, Value: !Ref PublicSubnets }
+        - { Namespace: "aws:ec2:vpc", OptionName: ELBScheme, Value: public }
+        - { Namespace: "aws:ec2:vpc", OptionName: AssociatePublicIpAddress, Value: "false" }
+        - { Namespace: "aws:ec2:instances", OptionName: InstanceTypes, Value: !Ref InstanceType }
+        - { Namespace: "aws:autoscaling:launchconfiguration", OptionName: IamInstanceProfile, Value: !Ref InstanceProfile }
+        - { Namespace: "aws:autoscaling:launchconfiguration", OptionName: SecurityGroups, Value: !Ref WebSg }
+        - { Namespace: "aws:autoscaling:launchconfiguration", OptionName: EC2KeyName, Value: !Ref KeyName }
+        - { Namespace: "aws:autoscaling:launchconfiguration", OptionName: DisableIMDSv1, Value: "true" }
+        - { Namespace: "aws:autoscaling:launchconfiguration", OptionName: RootVolumeType, Value: gp3 }
+        - { Namespace: "aws:autoscaling:launchconfiguration", OptionName: RootVolumeSize, Value: "10" }
+        # ---- Auto Scaling: 2 instances minimum (one per AZ), scale out fast on CPU, scale in when idle
+        - { Namespace: "aws:autoscaling:asg", OptionName: MinSize, Value: !Ref WebMin }
+        - { Namespace: "aws:autoscaling:asg", OptionName: MaxSize, Value: !Ref WebMax }
+        - { Namespace: "aws:autoscaling:asg", OptionName: Cooldown, Value: "120" }
+        - { Namespace: "aws:autoscaling:trigger", OptionName: MeasureName, Value: CPUUtilization }
+        - { Namespace: "aws:autoscaling:trigger", OptionName: Statistic, Value: Average }
+        - { Namespace: "aws:autoscaling:trigger", OptionName: Unit, Value: Percent }
+        - { Namespace: "aws:autoscaling:trigger", OptionName: Period, Value: "1" }
+        - { Namespace: "aws:autoscaling:trigger", OptionName: BreachDuration, Value: "1" }
+        - { Namespace: "aws:autoscaling:trigger", OptionName: EvaluationPeriods, Value: "1" }
+        - { Namespace: "aws:autoscaling:trigger", OptionName: UpperThreshold, Value: "45" }
+        - { Namespace: "aws:autoscaling:trigger", OptionName: UpperBreachScaleIncrement, Value: "2" }
+        - { Namespace: "aws:autoscaling:trigger", OptionName: LowerThreshold, Value: "15" }
+        - { Namespace: "aws:autoscaling:trigger", OptionName: LowerBreachScaleIncrement, Value: "-1" }
+        - { Namespace: "aws:autoscaling:updatepolicy:rollingupdate", OptionName: RollingUpdateEnabled, Value: "true" }
+        - { Namespace: "aws:autoscaling:updatepolicy:rollingupdate", OptionName: RollingUpdateType, Value: Health }
+        - { Namespace: "aws:elasticbeanstalk:command", OptionName: DeploymentPolicy, Value: Rolling }
+        - { Namespace: "aws:elasticbeanstalk:command", OptionName: BatchSizeType, Value: Percentage }
+        - { Namespace: "aws:elasticbeanstalk:command", OptionName: BatchSize, Value: "50" }
+        # ---- Load balancer
+        - { Namespace: "aws:elbv2:loadbalancer", OptionName: SecurityGroups, Value: !Ref AlbSg }
+        - { Namespace: "aws:elbv2:loadbalancer", OptionName: ManagedSecurityGroup, Value: !Ref AlbSg }
+        - { Namespace: "aws:elbv2:loadbalancer", OptionName: AccessLogsS3Enabled, Value: "true" }
+        - { Namespace: "aws:elbv2:loadbalancer", OptionName: AccessLogsS3Bucket, Value: !Ref LogsBucket }
+        - { Namespace: "aws:elbv2:loadbalancer", OptionName: AccessLogsS3Prefix, Value: alb }
+        - { Namespace: "aws:elasticbeanstalk:environment:process:default", OptionName: HealthCheckPath, Value: /health }
+        - { Namespace: "aws:elasticbeanstalk:environment:process:default", OptionName: DeregistrationDelay, Value: "20" }
+        - { Namespace: "aws:elasticbeanstalk:environment:process:default", OptionName: HealthCheckInterval, Value: "10" }
+        - !If
+          - Https
+          - { Namespace: "aws:elbv2:listener:443", OptionName: Protocol, Value: HTTPS }
+          - !Ref AWS::NoValue
+        - !If
+          - Https
+          - { Namespace: "aws:elbv2:listener:443", OptionName: SSLCertificateArns, Value: !Ref CertificateArn }
+          - !Ref AWS::NoValue
+        - !If
+          - Https
+          - { Namespace: "aws:elbv2:listener:443", OptionName: SSLPolicy, Value: ELBSecurityPolicy-TLS13-1-2-2021-06 }
+          - !Ref AWS::NoValue
+        # ---- Monitoring
+        - { Namespace: "aws:elasticbeanstalk:healthreporting:system", OptionName: SystemType, Value: enhanced }
+        - { Namespace: "aws:elasticbeanstalk:cloudwatch:logs", OptionName: StreamLogs, Value: "true" }
+        - { Namespace: "aws:elasticbeanstalk:cloudwatch:logs", OptionName: RetentionInDays, Value: "7" }
+        # ---- App configuration (no secrets - the app fetches DB credentials from Secrets Manager)
+        - { Namespace: "aws:elasticbeanstalk:application:environment", OptionName: DB_HOST, Value: !Ref DbEndpoint }
+        - { Namespace: "aws:elasticbeanstalk:application:environment", OptionName: DB_SECRET_ARN, Value: !Ref DbSecretArn }
+        - { Namespace: "aws:elasticbeanstalk:application:environment", OptionName: ASSETS_BUCKET, Value: !Ref AssetsBucket }
+        - { Namespace: "aws:elasticbeanstalk:application:environment", OptionName: DOCS_BUCKET, Value: !Ref DocsBucket }
+        - { Namespace: "aws:elasticbeanstalk:application:environment", OptionName: ORDERS_QUEUE_URL, Value: !Ref OrdersQueueUrl }
+        - { Namespace: "aws:elasticbeanstalk:application:environment", OptionName: DLQ_URL, Value: !Ref DlqUrl }
+        - { Namespace: "aws:elasticbeanstalk:application:environment", OptionName: TOPIC_ARN, Value: !Ref TopicArn }
+        - { Namespace: "aws:elasticbeanstalk:application:environment", OptionName: SWF_DOMAIN, Value: !Ref SwfDomain }
+        - { Namespace: "aws:elasticbeanstalk:application:environment", OptionName: KMS_KEY_ARN, Value: !Ref KeyArn }
+        - { Namespace: "aws:elasticbeanstalk:application:environment", OptionName: AWS_REGION, Value: !Ref AWS::Region }
+
+  # ================================================================ (b) FULFILMENT TIER - EC2 from AMI
+  WorkerTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${Project}-worker-lt"
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyName
+        IamInstanceProfile: { Name: !Ref InstanceProfile }       # role credentials - no access keys on disk
+        SecurityGroupIds: [!Ref WorkerSg]
+        MetadataOptions: { HttpTokens: required, HttpEndpoint: enabled, HttpPutResponseHopLimit: 1 }
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs: { VolumeSize: 10, VolumeType: gp3, Encrypted: true, KmsKeyId: !Ref KeyArn, DeleteOnTermination: true }
+          - DeviceName: /dev/sdf                                   # data volume for invoice cache + worker logs
+            Ebs: { VolumeSize: 8, VolumeType: gp3, Encrypted: true, KmsKeyId: !Ref KeyArn, DeleteOnTermination: true }
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: [{ Key: Name, Value: !Sub "${Project}-fulfilment-worker" }, { Key: Project, Value: !Ref Project }, { Key: Tier, Value: worker }]
+          - ResourceType: volume
+            Tags: [{ Key: Name, Value: !Sub "${Project}-worker-volume" }, { Key: Project, Value: !Ref Project }]
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+            dnf install -y python3-pip unzip
+            pip3 install --quiet boto3 pymysql cryptography
+            # ---- format + mount the attached EBS data volume
+            DATA=""
+            for d in /dev/nvme1n1 /dev/xvdf /dev/sdf; do [ -b "$d" ] && DATA=$d && break; done
+            mkdir -p /var/megafab
+            if [ -n "$DATA" ]; then
+              blkid "$DATA" || mkfs -t xfs "$DATA"
+              mount "$DATA" /var/megafab
+              echo "$DATA /var/megafab xfs defaults,nofail 0 2" >> /etc/fstab
+            fi
+            # ---- fetch worker code from the artifacts bucket (via S3 gateway endpoint)
+            mkdir -p /opt/megafab
+            aws s3 cp "s3://${ArtifactBucket}/${WorkerBundleKey}" /tmp/worker.zip --region ${AWS::Region}
+            unzip -o /tmp/worker.zip -d /opt/megafab
+            cat > /etc/systemd/system/megafab-worker.service <<EOF
+            [Unit]
+            Description=MegaFab fulfilment worker (SQS -> SWF -> SNS)
+            After=network-online.target
+            [Service]
+            WorkingDirectory=/opt/megafab
+            ExecStart=/usr/bin/python3 /opt/megafab/worker.py
+            Restart=always
+            RestartSec=5
+            Environment=AWS_REGION=${AWS::Region}
+            Environment=DB_HOST=${DbEndpoint}
+            Environment=DB_SECRET_ARN=${DbSecretArn}
+            Environment=DOCS_BUCKET=${DocsBucket}
+            Environment=ASSETS_BUCKET=${AssetsBucket}
+            Environment=ORDERS_QUEUE_URL=${OrdersQueueUrl}
+            Environment=TOPIC_ARN=${TopicArn}
+            Environment=SWF_DOMAIN=${SwfDomain}
+            Environment=KMS_KEY_ARN=${KeyArn}
+            Environment=RDS_CA_PATH=/var/megafab/rds-ca.pem
+            StandardOutput=append:/var/megafab/worker.log
+            StandardError=append:/var/megafab/worker.log
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            systemctl daemon-reload
+            systemctl enable --now megafab-worker
+
+  WorkerAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${Project}-fulfilment-asg"
+      LaunchTemplate: { LaunchTemplateId: !Ref WorkerTemplate, Version: !GetAtt WorkerTemplate.LatestVersionNumber }
+      MinSize: "1"
+      MaxSize: "4"
+      DesiredCapacity: "2"
+      VPCZoneIdentifier: !Ref AppSubnets
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 120
+      MetricsCollection: [{ Granularity: 1Minute }]
+      Tags: [{ Key: Project, Value: !Ref Project, PropagateAtLaunch: true }]
+    UpdatePolicy:
+      AutoScalingRollingUpdate: { MinInstancesInService: 1, MaxBatchSize: 1, PauseTime: PT1M }
+
+  WorkerScaleOut:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WorkerAsg
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      EstimatedInstanceWarmup: 90
+      StepAdjustments:
+        - { MetricIntervalLowerBound: 0, MetricIntervalUpperBound: 40, ScalingAdjustment: 1 }
+        - { MetricIntervalLowerBound: 40, ScalingAdjustment: 2 }
+  WorkerScaleIn:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WorkerAsg
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      StepAdjustments: [{ MetricIntervalUpperBound: 0, ScalingAdjustment: -1 }]
+  QueueBacklogHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Project}-orders-backlog-high"
+      AlarmDescription: Orders waiting in SQS - add fulfilment workers
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{ Name: QueueName, Value: !Ref OrdersQueueName }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions: [!Ref WorkerScaleOut]
+  QueueBacklogLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Project}-orders-backlog-low"
+      AlarmDescription: Queue drained - remove idle fulfilment workers
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{ Name: QueueName, Value: !Ref OrdersQueueName }]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      AlarmActions: [!Ref WorkerScaleIn]
+
+  # ================================================================ (c) MANAGEMENT BASTION (peered VPC)
+  Bastion:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref MgmtSubnet
+      SecurityGroupIds: [!Ref BastionSg]
+      MetadataOptions: { HttpTokens: required }
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 8, VolumeType: gp3, Encrypted: true, KmsKeyId: !Ref KeyArn }
+      Tags: [{ Key: Name, Value: !Sub "${Project}-mgmt-bastion" }, { Key: Project, Value: !Ref Project }, { Key: Tier, Value: management }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf install -y mariadb105 bind-utils jq
+          curl -s -o /etc/rds-ca.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+          cat > /usr/local/bin/megafab-db <<'EOF'
+          #!/bin/bash
+          # Connects to RDS over the VPC peering link, using Route 53 private DNS and verified TLS
+          S=$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${DbSecretArn} --query SecretString --output text)
+          H=$(getent hosts db.megafab.internal | awk '{print $2}')   # private DNS -> RDS endpoint name (matches the TLS certificate)
+          exec mysql -h "$H" -u "$(jq -r .username <<<"$S")" -p"$(jq -r .password <<<"$S")" \
+               --ssl-ca=/etc/rds-ca.pem --ssl-verify-server-cert megafab "$@"
+          EOF
+          cat > /usr/local/bin/megafab-backup <<'EOF'
+          #!/bin/bash
+          # Logical backup of the orders DB -> S3 (SSE-KMS); complements RDS automated snapshots
+          S=$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${DbSecretArn} --query SecretString --output text)
+          F=megafab-$(date +%Y%m%d-%H%M%S).sql.gz
+          H=$(getent hosts db.megafab.internal | awk '{print $2}')
+          mysqldump -h "$H" -u "$(jq -r .username <<<"$S")" -p"$(jq -r .password <<<"$S")" --ssl-ca=/etc/rds-ca.pem \
+              --single-transaction --set-gtid-purged=OFF megafab | gzip > /tmp/$F
+          aws s3 cp /tmp/$F s3://${DocsBucket}/backups/$F --sse aws:kms --sse-kms-key-id ${KeyArn} --region ${AWS::Region} && rm /tmp/$F
+          echo "backup uploaded: s3://${DocsBucket}/backups/$F"
+          EOF
+          chmod +x /usr/local/bin/megafab-db /usr/local/bin/megafab-backup
+          echo "0 21 * * * root /usr/local/bin/megafab-backup >> /var/log/megafab-backup.log 2>&1" > /etc/cron.d/megafab-backup
+
+Outputs:
+  EnvironmentUrl: { Value: !GetAtt EbEnv.EndpointURL }
+  EnvironmentName: { Value: !Ref EbEnv }
+  EnvironmentCname: { Value: !Sub "${Project}-macloud-${AWS::AccountId}.${AWS::Region}.elasticbeanstalk.com" }
+  WorkerAsgName: { Value: !Ref WorkerAsg }
+  BastionId: { Value: !Ref Bastion }
+  BastionPrivateIp: { Value: !GetAtt Bastion.PrivateIp }

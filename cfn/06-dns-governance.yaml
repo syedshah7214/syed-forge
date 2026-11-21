@@ -1,0 +1,377 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MegaFab 06 - DNS, identity and operations governance. Route 53 public + private hosted
+  zones and health check; IAM least-privilege managed policies (and, where the account
+  allows it, users / groups / roles); CloudWatch operations dashboard and alarms.
+
+Parameters:
+  Project: { Type: String, Default: megafab }
+  PublicDomain: { Type: String, Default: megafab-macloud.com }
+  AppVpcId: { Type: String }
+  MgmtVpcId: { Type: String }
+  EnvironmentCname: { Type: String }
+  DbEndpoint: { Type: String }
+  DbInstanceId: { Type: String }
+  BastionPrivateIp: { Type: String }
+  KeyArn: { Type: String }
+  AssetsBucketArn: { Type: String }
+  DocsBucketArn: { Type: String }
+  TrailBucket: { Type: String }
+  OrdersQueueArn: { Type: String }
+  OrdersQueueName: { Type: String }
+  TopicArn: { Type: String }
+  OpsTopicArn: { Type: String }
+  DbSecretArn: { Type: String }
+  SwfDomain: { Type: String }
+  WorkerAsgName: { Type: String }
+  CreateIdentities:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: true = create IAM users, groups and the app role (standard AWS account). AWS Academy Learner Lab denies iam:CreateUser/CreateGroup/CreateRole, so it is false there.
+
+  EnableCloudFront:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: true = put CloudFront (browser-trusted HTTPS) in front of the ALB. AWS Academy Learner Lab denies cloudfront:CreateDistribution, so it is false there.
+
+Conditions:
+  Identities: !Equals [!Ref CreateIdentities, "true"]
+  Cdn: !Equals [!Ref EnableCloudFront, "true"]
+
+Resources:
+  # ================================================================ ROUTE 53
+  PrivateZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: megafab.internal
+      HostedZoneConfig: { Comment: MegaFab internal names - resolvable from the app and management VPCs }
+      VPCs:
+        - { VPCId: !Ref AppVpcId, VPCRegion: !Ref AWS::Region }
+        - { VPCId: !Ref MgmtVpcId, VPCRegion: !Ref AWS::Region }
+  AppRecordPrivate:
+    Type: AWS::Route53::RecordSet
+    Properties: { HostedZoneId: !Ref PrivateZone, Name: app.megafab.internal, Type: CNAME, TTL: "60", ResourceRecords: [!Ref EnvironmentCname] }
+  DbRecordPrivate:
+    Type: AWS::Route53::RecordSet
+    Properties: { HostedZoneId: !Ref PrivateZone, Name: db.megafab.internal, Type: CNAME, TTL: "60", ResourceRecords: [!Ref DbEndpoint] }
+  BastionRecordPrivate:
+    Type: AWS::Route53::RecordSet
+    Properties: { HostedZoneId: !Ref PrivateZone, Name: bastion.megafab.internal, Type: A, TTL: "300", ResourceRecords: [!Ref BastionPrivateIp] }
+
+  PublicZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref PublicDomain
+      HostedZoneConfig: { Comment: Customer-facing zone. Point the registrar NS records at this zone once the domain is registered. }
+  WwwRecord:
+    Type: AWS::Route53::RecordSet
+    Properties: { HostedZoneId: !Ref PublicZone, Name: !Sub "www.${PublicDomain}", Type: CNAME, TTL: "60", ResourceRecords: [!Ref EnvironmentCname] }
+  PortalRecord:
+    Type: AWS::Route53::RecordSet
+    Properties: { HostedZoneId: !Ref PublicZone, Name: !Sub "portal.${PublicDomain}", Type: CNAME, TTL: "60", ResourceRecords: [!Ref EnvironmentCname] }
+
+  PortalHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTP
+        FullyQualifiedDomainName: !Ref EnvironmentCname
+        ResourcePath: /health
+        Port: 80
+        RequestInterval: 30
+        FailureThreshold: 3
+      HealthCheckTags: [{ Key: Name, Value: !Sub "${Project}-portal-health" }]
+  PortalDownAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Project}-portal-unreachable"
+      AlarmDescription: Route 53 health checkers cannot reach the customer portal
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions: [{ Name: HealthCheckId, Value: !Ref PortalHealthCheck }]
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      AlarmActions: [!Ref OpsTopicArn]
+
+  # ================================================================ CloudFront - trusted HTTPS for customers
+  # The lab cannot own a domain, so the ALB only has a self-signed certificate. CloudFront gives every
+  # customer a browser-trusted TLS connection (*.cloudfront.net certificate), HTTP/2+3, and edge DDoS
+  # protection, while the ALB stays the single origin.
+  PortalCdn:
+    Type: AWS::CloudFront::Distribution
+    Condition: Cdn
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: MegaFab customer portal - HTTPS at the edge
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: eb-alb
+            DomainName: !Ref EnvironmentCname
+            CustomOriginConfig: { OriginProtocolPolicy: http-only, HTTPPort: 80, OriginReadTimeout: 30 }
+        DefaultCacheBehavior:
+          TargetOriginId: eb-alb
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad          # managed: CachingDisabled (dynamic pages)
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # managed: AllViewerExceptHostHeader
+      Tags: [{ Key: Project, Value: !Ref Project }]
+
+  # ================================================================ IAM - least-privilege managed policies
+  EnforceMfaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Project}-EnforceMFA"
+      Description: Deny everything except MFA self-service until the user signs in with MFA
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowSelfServiceMfa
+            Effect: Allow
+            Action: [iam:CreateVirtualMFADevice, iam:EnableMFADevice, iam:ListMFADevices, iam:ResyncMFADevice, iam:GetUser, iam:ChangePassword, iam:ListVirtualMFADevices]
+            Resource: ["arn:aws:iam::*:user/${aws:username}", "arn:aws:iam::*:mfa/*"]
+          - Sid: DenyAllWithoutMfa
+            Effect: Deny
+            NotAction: [iam:CreateVirtualMFADevice, iam:EnableMFADevice, iam:GetUser, iam:ListMFADevices, iam:ListVirtualMFADevices, iam:ResyncMFADevice, iam:ChangePassword, sts:GetSessionToken]
+            Resource: "*"
+            Condition: { BoolIfExists: { "aws:MultiFactorAuthPresent": "false" } }
+
+  AdminsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Project}-PlatformAdmins"
+      Description: Full platform administration, but the audit trail and encryption key cannot be tampered with
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - { Sid: Administer, Effect: Allow, Action: "*", Resource: "*", Condition: { Bool: { "aws:MultiFactorAuthPresent": "true" } } }
+          - Sid: ProtectAuditTrail
+            Effect: Deny
+            Action: [cloudtrail:StopLogging, cloudtrail:DeleteTrail, cloudtrail:UpdateTrail, cloudtrail:PutEventSelectors]
+            Resource: "*"
+          - Sid: ProtectAuditBucket
+            Effect: Deny
+            Action: [s3:DeleteObject, s3:DeleteObjectVersion, s3:PutBucketPolicy, s3:DeleteBucket]
+            Resource: [!Sub "arn:aws:s3:::${TrailBucket}", !Sub "arn:aws:s3:::${TrailBucket}/*"]
+          - Sid: ProtectDataKey
+            Effect: Deny
+            Action: [kms:ScheduleKeyDeletion, kms:DisableKey, kms:PutKeyPolicy]
+            Resource: !Ref KeyArn
+
+  DevelopersPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Project}-Developers"
+      Description: Deploy application versions and read logs; no access to network, IAM or customer data
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: BeanstalkDeploy
+            Effect: Allow
+            Action: [elasticbeanstalk:CreateApplicationVersion, elasticbeanstalk:UpdateEnvironment, elasticbeanstalk:Describe*, elasticbeanstalk:List*, elasticbeanstalk:RequestEnvironmentInfo, elasticbeanstalk:RetrieveEnvironmentInfo]
+            Resource: "*"
+          - Sid: ReadOnlyOps
+            Effect: Allow
+            Action: [cloudformation:Describe*, cloudformation:List*, cloudformation:GetTemplate, logs:Get*, logs:Describe*, logs:FilterLogEvents, cloudwatch:Get*, cloudwatch:List*, ec2:Describe*, autoscaling:Describe*, sqs:GetQueueAttributes, sqs:ListQueues]
+            Resource: "*"
+          - Sid: ProductMedia
+            Effect: Allow
+            Action: [s3:GetObject, s3:PutObject, s3:ListBucket]
+            Resource: [!Ref AssetsBucketArn, !Sub "${AssetsBucketArn}/*"]
+          - Sid: UseKeyForMediaOnly
+            Effect: Allow
+            Action: [kms:Decrypt, kms:GenerateDataKey]
+            Resource: !Ref KeyArn
+            Condition: { StringEquals: { "kms:ViaService": !Sub "s3.${AWS::Region}.amazonaws.com" } }
+
+  OperatorsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Project}-Operators"
+      Description: Day-2 operations limited to resources tagged Project=megafab
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InstanceControlTaggedOnly
+            Effect: Allow
+            Action: [ec2:StartInstances, ec2:StopInstances, ec2:RebootInstances]
+            Resource: !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+            Condition: { StringEquals: { "aws:ResourceTag/Project": !Ref Project } }
+          - Sid: SessionManagerTaggedOnly
+            Effect: Allow
+            Action: ssm:StartSession
+            Resource: !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+            Condition: { StringEquals: { "aws:ResourceTag/Project": !Ref Project } }
+          - Sid: ScaleWorkers
+            Effect: Allow
+            Action: [autoscaling:SetDesiredCapacity, autoscaling:UpdateAutoScalingGroup]
+            Resource: !Sub "arn:aws:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${WorkerAsgName}"
+          - Sid: DatabaseOps
+            Effect: Allow
+            Action: [rds:CreateDBSnapshot, rds:RebootDBInstance, rds:DescribeDBInstances, rds:DescribeDBSnapshots]
+            Resource: [!Sub "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:${DbInstanceId}", !Sub "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:snapshot:*"]
+          - Sid: Observe
+            Effect: Allow
+            Action: [cloudwatch:Get*, cloudwatch:List*, cloudwatch:Describe*, ec2:Describe*, autoscaling:Describe*, sqs:GetQueueAttributes, swf:Count*, swf:List*, swf:Describe*, swf:GetWorkflowExecutionHistory]
+            Resource: "*"
+          - Sid: RedriveDeadLetters
+            Effect: Allow
+            Action: [sqs:StartMessageMoveTask, sqs:ReceiveMessage, sqs:DeleteMessage, sqs:SendMessage]
+            Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${OrdersQueueName}*"
+
+  AuditorsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Project}-Auditors"
+      Description: Read-only audit - CloudTrail, audit logs, Trusted Advisor, configuration
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TrailRead
+            Effect: Allow
+            Action: [cloudtrail:LookupEvents, cloudtrail:GetTrail*, cloudtrail:DescribeTrails, cloudtrail:ListTrails, cloudtrail:GetEventSelectors]
+            Resource: "*"
+          - Sid: AuditLogs
+            Effect: Allow
+            Action: [s3:GetObject, s3:ListBucket]
+            Resource: [!Sub "arn:aws:s3:::${TrailBucket}", !Sub "arn:aws:s3:::${TrailBucket}/*"]
+          - Sid: DecryptAuditLogsViaS3
+            Effect: Allow
+            Action: kms:Decrypt
+            Resource: !Ref KeyArn
+            Condition: { StringEquals: { "kms:ViaService": !Sub "s3.${AWS::Region}.amazonaws.com" } }
+          - Sid: Advisors
+            Effect: Allow
+            Action: [trustedadvisor:Describe*, trustedadvisor:Get*, trustedadvisor:List*, support:DescribeTrustedAdvisor*, iam:GenerateCredentialReport, iam:GetCredentialReport, iam:Get*, iam:List*]
+            Resource: "*"
+
+  AppRuntimePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Project}-AppRuntime"
+      Description: Exactly what the web and worker instances need at runtime - nothing more
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - { Sid: Orders, Effect: Allow, Action: [sqs:SendMessage, sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes, sqs:ChangeMessageVisibility], Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${OrdersQueueName}*" }
+          - { Sid: Notify, Effect: Allow, Action: [sns:Publish, sns:Subscribe, sns:ListSubscriptionsByTopic], Resource: !Ref TopicArn }
+          - { Sid: Workflow, Effect: Allow, Action: "swf:*", Resource: !Sub "arn:aws:swf:${AWS::Region}:${AWS::AccountId}:/domain/${SwfDomain}" }
+          - { Sid: Media, Effect: Allow, Action: [s3:GetObject, s3:PutObject], Resource: [!Sub "${AssetsBucketArn}/*", !Sub "${DocsBucketArn}/invoices/*"] }
+          - { Sid: DbCreds, Effect: Allow, Action: secretsmanager:GetSecretValue, Resource: !Ref DbSecretArn }
+          - { Sid: Crypto, Effect: Allow, Action: [kms:Decrypt, kms:GenerateDataKey], Resource: !Ref KeyArn }
+
+  # ---------------------------------------------------------------- identities (standard accounts only)
+  AdminsGroup:
+    Type: AWS::IAM::Group
+    Condition: Identities
+    Properties: { GroupName: !Sub "${Project}-admins", ManagedPolicyArns: [!Ref AdminsPolicy, !Ref EnforceMfaPolicy] }
+  DevelopersGroup:
+    Type: AWS::IAM::Group
+    Condition: Identities
+    Properties: { GroupName: !Sub "${Project}-developers", ManagedPolicyArns: [!Ref DevelopersPolicy, !Ref EnforceMfaPolicy] }
+  OperatorsGroup:
+    Type: AWS::IAM::Group
+    Condition: Identities
+    Properties: { GroupName: !Sub "${Project}-operators", ManagedPolicyArns: [!Ref OperatorsPolicy, !Ref EnforceMfaPolicy] }
+  AuditorsGroup:
+    Type: AWS::IAM::Group
+    Condition: Identities
+    Properties: { GroupName: !Sub "${Project}-auditors", ManagedPolicyArns: [!Ref AuditorsPolicy, !Ref EnforceMfaPolicy] }
+  UserMeasum:
+    Type: AWS::IAM::User
+    Condition: Identities
+    Properties: { UserName: measum.shah, Groups: [!Ref AdminsGroup], Tags: [{ Key: Team, Value: MACloud }] }
+  UserArooba:
+    Type: AWS::IAM::User
+    Condition: Identities
+    Properties: { UserName: arooba.mansoor, Groups: [!Ref DevelopersGroup, !Ref OperatorsGroup], Tags: [{ Key: Team, Value: MACloud }] }
+  UserOps:
+    Type: AWS::IAM::User
+    Condition: Identities
+    Properties: { UserName: plant.operator, Groups: [!Ref OperatorsGroup] }
+  UserAuditor:
+    Type: AWS::IAM::User
+    Condition: Identities
+    Properties: { UserName: external.auditor, Groups: [!Ref AuditorsGroup] }
+  AppRole:
+    Type: AWS::IAM::Role
+    Condition: Identities
+    Properties:
+      RoleName: !Sub "${Project}-app-instance-role"
+      AssumeRolePolicyDocument:
+        Statement: [{ Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns:
+        - !Ref AppRuntimePolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: Identities
+    Properties: { InstanceProfileName: !Sub "${Project}-app-instance-profile", Roles: [!Ref AppRole] }
+
+  # ================================================================ CloudWatch dashboard
+  OpsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${Project}-operations"
+      DashboardBody: !Sub |
+        {"widgets":[
+         {"type":"text","x":0,"y":0,"width":24,"height":2,"properties":{"markdown":"# MegaFab platform - live operations\nWeb tier (Elastic Beanstalk ASG) · Fulfilment workers (EC2 ASG) · RDS Multi-AZ · SQS/SWF/SNS"}},
+         {"type":"metric","x":0,"y":2,"width":8,"height":6,"properties":{"title":"Load balancer requests / min","region":"${AWS::Region}","stat":"Sum","period":60,
+           "metrics":[[{"expression":"SEARCH('{AWS/ApplicationELB,LoadBalancer} MetricName=\"RequestCount\"','Sum',60)","id":"e1"}]]}},
+         {"type":"metric","x":8,"y":2,"width":8,"height":6,"properties":{"title":"EC2 CPU by Auto Scaling group","region":"${AWS::Region}","period":60,
+           "metrics":[[{"expression":"SEARCH('{AWS/EC2,AutoScalingGroupName} MetricName=\"CPUUtilization\"','Average',60)","id":"e2"}]]}},
+         {"type":"metric","x":16,"y":2,"width":8,"height":6,"properties":{"title":"In-service instances","region":"${AWS::Region}","period":60,
+           "metrics":[[{"expression":"SEARCH('{AWS/AutoScaling,AutoScalingGroupName} MetricName=\"GroupInServiceInstances\"','Maximum',60)","id":"e3"}]]}},
+         {"type":"metric","x":0,"y":8,"width":8,"height":6,"properties":{"title":"Order queue depth (SQS)","region":"${AWS::Region}","period":60,"stat":"Maximum",
+           "metrics":[["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${OrdersQueueName}"],["AWS/SQS","NumberOfMessagesSent","QueueName","${OrdersQueueName}",{"stat":"Sum"}],["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${OrdersQueueName}-dlq"]]}},
+         {"type":"metric","x":8,"y":8,"width":8,"height":6,"properties":{"title":"RDS CPU / connections","region":"${AWS::Region}","period":60,
+           "metrics":[["AWS/RDS","CPUUtilization","DBInstanceIdentifier","${DbInstanceId}"],["AWS/RDS","DatabaseConnections","DBInstanceIdentifier","${DbInstanceId}",{"yAxis":"right"}]]}},
+         {"type":"metric","x":16,"y":8,"width":8,"height":6,"properties":{"title":"SWF workflows","region":"${AWS::Region}","period":300,"stat":"Sum",
+           "metrics":[["AWS/SWF","WorkflowsCompleted","Domain","${SwfDomain}","WorkflowTypeName","OrderFulfilment","WorkflowTypeVersion","1.0"],["AWS/SWF","WorkflowsFailed","Domain","${SwfDomain}","WorkflowTypeName","OrderFulfilment","WorkflowTypeVersion","1.0"]]}}
+        ]}
+
+  RdsCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Project}-rds-cpu-high"
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions: [{ Name: DBInstanceIdentifier, Value: !Ref DbInstanceId }]
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions: [!Ref OpsTopicArn]
+  BillingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Project}-estimated-charges-over-20usd"
+      AlarmDescription: Cost guard-rail (billing metrics are published in us-east-1)
+      Namespace: AWS/Billing
+      MetricName: EstimatedCharges
+      Dimensions: [{ Name: Currency, Value: USD }]
+      Statistic: Maximum
+      Period: 21600
+      EvaluationPeriods: 1
+      Threshold: 20
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OpsTopicArn]
+
+Outputs:
+  PrivateZoneId: { Value: !Ref PrivateZone }
+  PublicZoneId: { Value: !Ref PublicZone }
+  PublicNameServers: { Value: !Join [",", !GetAtt PublicZone.NameServers] }
+  HealthCheckId: { Value: !Ref PortalHealthCheck }
+  PortalHttpsUrl: { Value: !If [Cdn, !Sub "https://${PortalCdn.DomainName}", !Sub "https://${EnvironmentCname} (ALB, self-signed certificate)"] }
+  DashboardUrl: { Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${Project}-operations" }

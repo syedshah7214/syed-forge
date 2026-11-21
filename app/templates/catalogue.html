@@ -1,0 +1,144 @@
+{% extends "portal_base.html" %}
+{% block body %}
+<section class="forge-hero" id="overview">
+  <div class="copy">
+    <span class="kicker">INDUSTRIAL CLOUD &amp; SUPPLY INTELLIGENCE</span>
+    <h1><span class="s">Engineered for industry.</span><br><em>Powered by AWS.</em></h1>
+    <p class="lead">SYED FORGE is the ordering and operations platform for MegaFab Industrial Supply — bulk-order bearings, hydraulics, fasteners and more, then follow every order through an Amazon SQS → SWF → EC2 fulfilment workflow in real time.</p>
+    <div class="cta"><a class="btn primary" href="#catalogue">Browse the catalogue →</a><a class="btn" href="/track">Track an order</a><a class="btn ghost" href="/ops/architecture"><span data-icon="arch" data-size="16"></span>See the architecture</a></div>
+    <div class="stats" aria-label="Live figures from Amazon RDS">
+      <div><span class="eyebrow">Products</span><b data-count="{{ products|length }}">{{ products|length }}</b></div>
+      <div><span class="eyebrow">Categories</span><b data-count="{{ cats|length }}">{{ cats|length }}</b></div>
+      <div><span class="eyebrow">Orders placed</span><b data-count="{{ stats.n }}">{{ stats.n }}</b></div>
+      <div><span class="eyebrow">Order volume</span><b data-count="{{ stats.v|float }}" data-fmt="pkr">{{ pkr(stats.v) }}</b></div>
+    </div>
+  </div>
+  <div class="scene" data-scene aria-hidden="true"><canvas></canvas>
+    <div class="cap"><span><b>FACTORY FLOOR ⇄ AWS us-east-1</b><br>EC2 · SQS · SWF · RDS · S3 · SNS</span><span>ILLUSTRATION · NOT LIVE DATA</span></div></div>
+</section>
+
+<div class="trust">
+  <div class="card"><span class="ic" data-icon="shield" data-size="18"></span><div><b>Encrypted end to end</b><span>TLS to the database, AWS KMS for RDS, S3, SQS and SNS.</span></div></div>
+  <div class="card"><span class="ic" data-icon="flow" data-size="18"></span><div><b>Workflow-driven fulfilment</b><span>Validate, reserve, invoice, ship, notify — orchestrated by Amazon SWF.</span></div></div>
+  <div class="card"><span class="ic" data-icon="stack" data-size="18"></span><div><b>Multi-AZ resilience</b><span>Two Availability Zones for web, workers and the RDS standby.</span></div></div>
+  <div class="card"><span class="ic" data-icon="pulse" data-size="18"></span><div><b>Elastic capacity</b><span>Web tier scales 2–6 instances; workers scale 1–4 on queue depth.</span></div></div>
+</div>
+
+<div class="section-h" id="catalogue"><div><span class="kicker">INDUSTRIAL CATALOGUE</span><h2>Stocked, priced and ready to ship</h2>
+  <p>Live stock from Amazon RDS. Set quantities on any number of products, then place one bulk order below.</p></div></div>
+
+<form method="post" action="/orders" id="order-form" novalidate>
+<div class="toolbar" role="search">
+  <div class="search"><span data-icon="search"></span><label class="sr" for="q">Search products</label>
+    <input id="q" class="input" placeholder="Search SKU, product or category…  ( / )" autocomplete="off"></div>
+  <div class="chips" role="tablist" aria-label="Categories">
+    <button type="button" class="chip on" data-cat="">All<span class="n">{{ products|length }}</span></button>
+    {% for c in cats %}<button type="button" class="chip" data-cat="{{ c }}">{{ c }}<span class="n">{{ products|selectattr('category','equalto',c)|list|length }}</span></button>{% endfor %}
+  </div>
+</div>
+
+<div class="products" id="grid">
+{% for p in products %}
+  <article class="card glow prod" data-sku="{{ p.sku }}" data-cat="{{ p.category }}" data-price="{{ p.price|float }}"
+           data-search="{{ (p.sku ~ ' ' ~ p.name ~ ' ' ~ p.category ~ ' ' ~ p.description)|lower }}">
+    <div class="img" data-detail tabindex="0" role="button" aria-label="Details for {{ p.name }}">
+      <img src="{{ p.image_url or ('/catalogue-art/' ~ p.sku ~ '.svg') }}" alt="{{ p.name }}" loading="lazy" width="320" height="240" onerror="this.onerror=null;this.src='/catalogue-art/{{ p.sku }}.svg'">
+      <span class="badge tag">{{ p.category }}</span>
+    </div>
+    <div class="body">
+      <span class="eyebrow">{{ p.sku }}</span>
+      <h3 data-detail>{{ p.name }}</h3>
+      <p>{{ p.description }}</p>
+      <div class="row">
+        <div><div class="price">{{ pkr(p.price) }} <small>/ {{ p.unit }}</small></div>
+          <div class="stock {{ p.state }}">{{ p.stock }} × {{ p.unit }} in stock{% if p.state == 'low' %} · reorder{% endif %}</div></div>
+        <div class="stepper"><button type="button" data-step="-1" aria-label="Decrease {{ p.name }}">−</button>
+          <input type="number" min="0" max="10000" inputmode="numeric" name="qty_{{ p.sku }}" aria-label="Quantity of {{ p.name }}" placeholder="0">
+          <button type="button" data-step="1" aria-label="Increase {{ p.name }}">+</button></div>
+      </div>
+    </div>
+  </article>
+{% endfor %}
+</div>
+<div class="empty card" id="none" hidden>No products match your search.</div>
+
+<div class="dock" id="bulk" aria-label="Bulk order">
+  <div class="sum"><span id="dock-lines">No items selected</span><b id="dock-total">Rs 0</b></div>
+  <label class="sr" for="company">Company name</label><input id="company" class="input" name="company" placeholder="Company name" required>
+  <label class="sr" for="email">Purchasing email</label><input id="email" class="input" name="email" type="email" placeholder="Purchasing email" required>
+  <label class="sr" for="priority">Priority</label><select id="priority" class="input" name="priority"><option>STANDARD</option><option>EXPRESS</option></select>
+  <button class="btn primary" id="submit" disabled>Place bulk order →</button>
+  <a class="btn sm hint" href="#catalogue">Add quantities ↑</a>
+</div>
+</form>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="d-title">
+  <div class="drawer-h"><span class="eyebrow" id="d-sku"></span><button class="x" id="d-close" aria-label="Close">×</button></div>
+  <div class="drawer-b" id="d-body"></div>
+</aside>
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  document.querySelectorAll("[data-bulk]").forEach(a => a.addEventListener("click", e => { e.preventDefault();
+    const d = document.getElementById("bulk");
+    if (d.classList.contains("has-items")) { document.getElementById("company").focus(); }
+    else { document.getElementById("catalogue").scrollIntoView({ behavior: "smooth" }); NX.toast("Bulk order", "Set quantities on the products you need — the order panel collects them.", "info"); }
+  }));
+  document.querySelectorAll("[data-count]").forEach(el => { el.dataset.v = 0; NX.count(el, +el.dataset.count, el.dataset.fmt === "pkr" ? NX.pkr : NX.num); });
+  const cards = [...document.querySelectorAll(".prod")], q = document.getElementById("q"), none = document.getElementById("none");
+  let cat = "";
+  const filter = () => {
+    const t = q.value.trim().toLowerCase(); let shown = 0;
+    cards.forEach(c => { const v = (!cat || c.dataset.cat === cat) && (!t || c.dataset.search.includes(t)); c.hidden = !v; shown += v; });
+    none.hidden = shown > 0;
+  };
+  q.addEventListener("input", filter);
+  document.addEventListener("keydown", e => { if (e.key === "/" && document.activeElement.tagName !== "INPUT") { e.preventDefault(); q.focus(); } });
+  document.querySelectorAll(".chip").forEach(ch => ch.addEventListener("click", () => {
+    document.querySelectorAll(".chip").forEach(x => x.classList.toggle("on", x === ch)); cat = ch.dataset.cat; filter();
+  }));
+  const p0 = new URLSearchParams(location.search).get("category");
+  if (p0) document.querySelector(`.chip[data-cat="${CSS.escape(p0)}"]`)?.click();
+
+  // ---- order dock
+  const form = document.getElementById("order-form"), submit = document.getElementById("submit");
+  const update = () => {
+    let total = 0, lines = 0, units = 0;
+    cards.forEach(c => { const i = c.querySelector("input"); const n = Math.max(0, Math.min(10000, parseInt(i.value || 0, 10) || 0));
+      c.classList.toggle("in-cart", n > 0); if (n) { lines++; units += n; total += n * +c.dataset.price; } });
+    NX.count(document.getElementById("dock-total"), total, NX.pkr);
+    document.querySelector(".dock").classList.toggle("has-items", lines > 0);
+    document.getElementById("dock-lines").textContent = lines ? `${lines} line${lines > 1 ? "s" : ""} · ${units.toLocaleString()} units` : "No items selected";
+    const em = document.getElementById("email").value, co = document.getElementById("company").value.trim();
+    submit.disabled = !(lines && co && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em));
+  };
+  form.addEventListener("input", update);
+  document.querySelectorAll("[data-step]").forEach(b => b.addEventListener("click", () => {
+    const i = b.parentElement.querySelector("input"); i.value = Math.max(0, Math.min(10000, (parseInt(i.value || 0, 10) || 0) + +b.dataset.step)) || ""; update();
+  }));
+  form.addEventListener("submit", e => { if (submit.disabled) { e.preventDefault(); return; } submit.disabled = true; submit.textContent = "Placing order…"; });
+  update();
+
+  // ---- product detail drawer
+  const drawer = document.getElementById("drawer"), scrim = document.getElementById("scrim");
+  const open = c => {
+    const img = c.querySelector("img")?.src || "", name = c.querySelector("h3").textContent, desc = c.querySelector("p").textContent;
+    document.getElementById("d-sku").textContent = c.dataset.sku;
+    document.getElementById("d-body").innerHTML = `${img ? `<img src="${img}" alt="" style="width:100%;border-radius:12px;border:1px solid var(--line)">` : ""}
+      <span class="badge" style="margin-top:16px">${NX.esc(c.dataset.cat)}</span><h2 id="d-title" style="font-size:24px;margin:10px 0 6px">${NX.esc(name)}</h2>
+      <p class="muted">${NX.esc(desc)}</p><dl class="kv" style="margin-top:18px"><dt>Unit price</dt><dd>${c.querySelector(".price").innerHTML}</dd>
+      <dt>Availability</dt><dd>${c.querySelector(".stock").outerHTML}</dd><dt>SKU</dt><dd class="mono">${NX.esc(c.dataset.sku)}</dd>
+      <dt>Image</dt><dd class="muted">Served from Amazon S3 (SSE-KMS) via a short-lived pre-signed URL</dd></dl>
+      <button class="btn primary" style="margin-top:22px;width:100%" id="d-add">Add 10 to order</button>`;
+    document.getElementById("d-add").onclick = () => { const i = c.querySelector("input"); i.value = (parseInt(i.value || 0, 10) || 0) + 10; update(); close(); NX.toast("Added to bulk order", name, "ok"); };
+    drawer.classList.add("open"); scrim.classList.add("open"); drawer.setAttribute("aria-hidden", "false"); document.getElementById("d-close").focus();
+  };
+  const close = () => { drawer.classList.remove("open"); scrim.classList.remove("open"); drawer.setAttribute("aria-hidden", "true"); };
+  document.querySelectorAll("[data-detail]").forEach(el => { el.addEventListener("click", () => open(el.closest(".prod")));
+    el.addEventListener("keydown", e => { if (e.key === "Enter") open(el.closest(".prod")); }); });
+  scrim.onclick = close; document.getElementById("d-close").onclick = close; document.addEventListener("keydown", e => e.key === "Escape" && close());
+})();
+</script>
+{% endblock %}

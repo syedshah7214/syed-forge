@@ -1,0 +1,29 @@
+{% extends "console_base.html" %}
+{% block body %}
+<div class="page-h"><div><span class="eyebrow">Infrastructure Health</span><h1>Dependency probes</h1>
+  <p>This web instance calls each AWS dependency with a lightweight read and measures the round-trip. A failed probe is shown as down — never assumed healthy.</p></div></div>
+<div class="cols-3">
+  <section class="card"><div class="card-h"><h3>Probes</h3><span class="eyebrow">from {{ instance_id }} · {{ az }}</span></div><div class="card-b"><div class="svc-grid" id="pr"><div class="sk" style="height:160px"></div></div></div></section>
+  <section class="card glow"><div class="card-h"><h3>Health score</h3></div><div class="card-b" style="text-align:center"><div id="score" style="font-size:64px;font-weight:800">—</div><div class="muted" id="score-s">&nbsp;</div>
+    <div class="dim mono" style="font-size:11px;margin-top:14px">score = probes passing ÷ probes run · refreshed every 15 s</div></div></section>
+</div>
+<section class="card mt"><div class="card-h"><h3>Latency history (this browser session)</h3><span class="eyebrow">collected while this page is open — not stored</span></div><div class="card-b" id="hist"><div class="empty">Collecting…</div></div></section>
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const H = {};
+  async function load() {
+    const h = await NX.get("/api/ops/health"); NX.stamp();
+    if (!h || h.state !== "ok") { document.getElementById("pr").innerHTML = '<div class="empty">Health endpoint unavailable</div>'; return; }
+    document.getElementById("pr").innerHTML = h.probes.map(p => `<div class="svc"><div class="h">${NX.esc(p.name)}<span class="badge ${p.state === "ok" ? "ok" : "down"}">${p.state === "ok" ? "UP" : "DOWN"}</span></div><div class="m">${p.ms} ms${p.reason ? " · " + NX.esc(p.reason) : ""}</div></div>`).join("");
+    const sc = document.getElementById("score"); sc.textContent = h.score + "%"; sc.style.color = h.score === 100 ? "var(--green)" : h.score >= 50 ? "var(--amber)" : "var(--red)";
+    document.getElementById("score-s").textContent = `${h.probes.filter(p => p.state === "ok").length} of ${h.probes.length} dependencies reachable`;
+    h.probes.forEach(p => { (H[p.name] = H[p.name] || []).push({v: p.ms}); if (H[p.name].length > 40) H[p.name].shift(); });
+    document.getElementById("hist").innerHTML = `<div class="cols-3b">${Object.keys(H).map(k => `<div><div style="display:flex;justify-content:space-between;font-size:12.5px"><b>${NX.esc(k)}</b><span class="mono dim">${H[k].at(-1).v} ms</span></div><div data-h="${NX.esc(k)}"></div></div>`).join("")}</div>`;
+    document.querySelectorAll("[data-h]").forEach(el => NX.spark(el, H[el.dataset.h]));
+  }
+  NX.poll(load, 15000);
+})();
+</script>
+{% endblock %}

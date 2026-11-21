@@ -1,0 +1,209 @@
+{% extends "console_base.html" %}
+{% block body %}
+<header class="cc-head">
+  <img class="syed-logo" src="{{ url_for('static', filename='brand/syed-logo.webp') }}" alt="SYED logo" width="1536" height="1024">
+  <div><span class="eyebrow">Command Center</span><h1 style="margin-top:10px">SYED <i>FORGE</i></h1>
+    <p>Industrial Cloud &amp; Supply Intelligence — every figure here is read from Amazon RDS, SQS, SWF and EC2 Auto Scaling; nothing is estimated.</p></div>
+  <div class="facts">
+    <span>STATUS</span><span id="sys-status" class="badge"><span class="dot info"></span>CHECKING</span>
+    <span>REGION</span><b>{{ region }}</b>
+    <span>ENVIRONMENT</span><b>{{ env_name }}</b>
+    <span>SERVED BY</span><b>{{ instance_id }} · {{ az }}</b>
+    <span>LAST UPDATED</span><b id="cc-upd">—</b>
+  </div>
+</header>
+
+<div class="kpis">
+  <div class="card glow kpi"><span class="ic" data-icon="box" data-size="16"></span><span class="eyebrow">Total products</span><div class="v sk" id="k-products">00</div><div class="s" id="k-products-s">&nbsp;</div></div>
+  <div class="card glow kpi amber"><span class="ic" data-icon="store" data-size="16"></span><span class="eyebrow">Total orders</span><div class="v sk" id="k-orders">00</div><div class="s" id="k-orders-s">&nbsp;</div></div>
+  <div class="card glow kpi amber"><span class="ic" data-icon="money" data-size="16"></span><span class="eyebrow">Total order volume</span><div class="v sk" id="k-value">Rs 0</div><div class="s">PKR · excl. sales tax</div></div>
+  <div class="card glow kpi green"><span class="ic" data-icon="check" data-size="16"></span><span class="eyebrow">Completed orders</span><div class="v sk" id="k-done">0</div><div class="bar green" style="margin-top:10px"><i id="k-done-bar" style="width:0"></i></div></div>
+  <div class="card glow kpi"><span class="ic" data-icon="cpu" data-size="16"></span><span class="eyebrow">Active web instances</span><div class="v sk" id="k-web">0</div><div class="s" id="k-web-s">&nbsp;</div></div>
+  <div class="card glow kpi"><span class="ic" data-icon="workers" data-size="16"></span><span class="eyebrow">Active fulfilment workers</span><div class="v sk" id="k-wk">0</div><div class="s" id="k-wk-s">&nbsp;</div></div>
+  <div class="card glow kpi"><span class="ic" data-icon="queue" data-size="16"></span><span class="eyebrow">SQS queue depth</span><div class="v sk" id="k-q">0</div><div class="s" id="k-q-s">&nbsp;</div></div>
+  <div class="card glow kpi red"><span class="ic" data-icon="bell" data-size="16"></span><span class="eyebrow">System alerts</span><div class="v sk" id="k-al">0</div><div class="s" id="k-al-s">&nbsp;</div></div>
+</div>
+
+<div class="cc-grid">
+  <section class="card c8"><div class="card-h"><h3>Live fulfilment tracker</h3>
+      <div class="tbl-tools"><label class="sr" for="trk-sel">Order to follow</label><select class="input" id="trk-sel" style="width:auto;height:32px"></select><a class="btn sm ghost" id="trk-open" href="#">Open →</a></div></div>
+    <div class="card-b">
+      <div id="trk-meta" class="mono muted" style="font-size:12px;display:flex;gap:18px;flex-wrap:wrap;margin-bottom:16px">&nbsp;</div>
+      <div class="tracker" id="trk"></div>
+      <div id="trk-last" class="muted" style="font-size:13px;margin-top:16px;min-height:20px"></div>
+      <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:14px"><span class="eyebrow">Orders currently at each stage · all orders</span><div class="flow" id="pipeline" style="margin-top:6px"></div></div>
+    </div></section>
+
+  <section class="card c4"><div class="card-h"><h3>AWS operations health</h3><a class="btn sm ghost" href="/ops/health">Details →</a></div>
+    <div class="card-b"><div class="svc-grid" id="svc" style="grid-template-columns:1fr 1fr"><div class="sk" style="height:220px;grid-column:1/-1"></div></div></div></section>
+
+  <section class="card c7 minimap"><div class="card-h"><h3>Interactive AWS architecture</h3><a class="btn sm" href="/ops/architecture">Open explorer →</a></div>
+    <div class="card-b"><svg viewBox="0 0 820 300" role="group" aria-label="Compact architecture map — select a service to explore it" id="mini"></svg>
+      <p class="dim mono" style="font-size:11px;margin:6px 0 0">Select any service to open it in the Architecture Explorer. Numbers on the map are live; pulses are a visual aid.</p></div></section>
+
+  <section class="card c5"><div class="card-h"><h3>Factory intelligence</h3><a class="btn sm ghost" href="/ops/factory">Open →</a></div>
+    <div class="card-b"><div id="tele"><div class="sk" style="height:200px"></div></div></div></section>
+
+  <section class="card c8"><div class="card-h"><h3>Recent orders</h3>
+      <div class="tbl-tools"><label class="sr" for="o-q">Search orders</label><input class="input" id="o-q" placeholder="Search company, status, #…" autocomplete="off"><a class="btn sm ghost" href="/ops/fulfilment">All →</a></div></div>
+    <div class="card-b tbl-wrap"><table class="table"><thead><tr>
+      <th class="th-sort" data-k="id" tabindex="0">#</th><th class="th-sort" data-k="company" tabindex="0">Company</th><th class="th-sort" data-k="status" tabindex="0">Status</th>
+      <th class="th-sort" data-k="priority" tabindex="0">Priority</th><th class="th-sort num" data-k="total" tabindex="0">Total</th><th class="th-sort num" data-k="secs" tabindex="0">Cycle</th><th class="th-sort" data-k="created_at" tabindex="0">Placed</th></tr></thead>
+      <tbody id="orders"><tr><td colspan="7"><div class="sk" style="height:160px"></div></td></tr></tbody></table></div></section>
+
+  <section class="card c4"><div class="card-h"><h3>Infrastructure activity</h3><span class="eyebrow">order_events · RDS</span></div>
+    <div class="card-b"><div class="feed" id="feed" style="max-height:420px;overflow:auto"><div class="sk" style="height:200px"></div></div></div></section>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const un = x => x && x.state === "ok", $ = id => document.getElementById(id);
+  const STAGES = [
+    { k: ["RECEIVED", "QUEUED"], l: "Received & queued", s: "RDS · SQS", ic: "queue" }, { k: ["WORKFLOW_STARTED"], l: "Workflow started", s: "SWF", ic: "flow" },
+    { k: ["VALIDATED"], l: "Validated", s: "activity 1", ic: "check" }, { k: ["STOCK_RESERVED"], l: "Stock reserved", s: "activity 2", ic: "box" },
+    { k: ["INVOICED"], l: "Invoice generated", s: "S3 · KMS", ic: "invoice" }, { k: ["SHIPPED"], l: "Shipment booked", s: "activity 4", ic: "truck" },
+    { k: ["COMPLETED"], l: "Notified & complete", s: "SNS", ic: "mail" }];
+  const stageOf = st => STAGES.findIndex(x => x.k.includes(st));
+
+  // ---------- summary + KPIs
+  async function summary() {
+    const s = await NX.get("/api/ops/summary"); NX.stamp(); $("cc-upd").textContent = new Date().toLocaleTimeString();
+    const fail = (id, sub, txt) => { const e = $(id); e.classList.remove("sk"); e.textContent = "—"; $(sub).textContent = txt; };
+    if (un(s.db)) {
+      NX.count($("k-products"), s.db.products); $("k-products-s").textContent = `${s.db.low_stock} at or below re-order level`;
+      NX.count($("k-orders"), s.db.orders); $("k-orders-s").textContent = `${s.db.pending} in progress · ${s.db.failed} rejected`;
+      NX.count($("k-value"), s.db.value, NX.pkr);
+      NX.count($("k-done"), s.db.completed); $("k-done-bar").style.width = (s.db.orders ? s.db.completed / s.db.orders * 100 : 0) + "%";
+      const by = Object.fromEntries(s.db.by_status.map(r => [r.status, r.n]));
+      $("pipeline").innerHTML = [...STAGES, { k: ["REJECTED", "FAILED"], l: "Rejected" }].map((st, i) => {
+        const n = st.k.reduce((a, k) => a + (by[k] || 0), 0), c = st.l === "Rejected" ? (n ? "var(--red)" : "var(--dim)") : st.k[0] === "COMPLETED" ? "var(--green)" : n ? "var(--amber)" : "var(--dim)";
+        return (i ? '<div class="ln"></div>' : "") + `<div class="n"><div class="b" style="color:${c};font-size:15px">${n}</div><span>${st.l.split(" ")[0]}</span></div>`; }).join("");
+    } else { fail("k-products", "k-products-s", "RDS unavailable"); fail("k-orders", "k-orders-s", "RDS unavailable"); }
+    const c = s.compute;
+    if (un(c) && c.web) { NX.count($("k-web"), c.web.in_service); $("k-web-s").textContent = `configured ${c.web.min}–${c.web.max} · desired ${c.web.desired}`; }
+    else fail("k-web", "k-web-s", "Auto Scaling API unavailable");
+    if (un(s.workers)) { NX.count($("k-wk"), s.workers.healthy); $("k-wk-s").textContent = un(c) && c.workers ? `heartbeat < 90 s · ASG ${c.workers.in_service}/${c.workers.max}` : "heartbeat within 90 s"; }
+    else fail("k-wk", "k-wk-s", "heartbeats unavailable");
+    if (un(s.queues)) { NX.count($("k-q"), s.queues.orders.waiting); $("k-q-s").textContent = `${s.queues.orders.inflight} in flight · DLQ ${s.queues.dlq.waiting}`; }
+    else fail("k-q", "k-q-s", "SQS unavailable");
+    const h = s.health, down = (h.probes || []).filter(p => p.state !== "ok"), sys = $("sys-status");
+    const lvl = down.length ? (h.score < 50 ? "bad" : "warn") : "ok";
+    sys.className = "badge " + lvl; sys.innerHTML = `<span class="dot ${lvl}"></span>${down.length ? `DEGRADED · ${h.score}%` : "ALL CHECKS PASSING"}`;
+    const card = (name, st, metric) => `<div class="svc"><div class="h">${name}<span class="badge ${({ ok: "ok", warn: "warn", na: "info" })[st] || "bad"}">${({ ok: "OK", warn: "WATCH", na: "N/A" })[st] || "ALERT"}</span></div><div class="m">${metric}</div></div>`;
+    const probe = n => (h.probes || []).find(p => p.name.startsWith(n)), pm = n => probe(n) ? (probe(n).state === "ok" ? "ok" : "bad") : "na";
+    $("svc").innerHTML = [
+      card("Web application", un(c) && c.web ? (c.web.in_service >= c.web.min ? "ok" : "warn") : "na", un(c) && c.web ? `${c.web.in_service} EC2 in service` : "ASG API unavailable"),
+      card("Fulfilment workers", un(s.workers) ? (s.workers.healthy ? "ok" : "bad") : "na", un(s.workers) ? `${s.workers.healthy} heartbeat(s)` : "unavailable"),
+      card("Amazon RDS", pm("RDS"), probe("RDS") ? `query ${probe("RDS").ms} ms` : "—"),
+      card("Amazon SQS", pm("SQS"), un(s.queues) ? `${s.queues.orders.waiting} waiting` : "unavailable"),
+      card("Amazon SWF", pm("SWF"), un(s.workflows) ? `${s.workflows.open} open · ${s.workflows.closed} closed` : "unavailable"),
+      card("Dead-letter queue", un(s.queues) ? (s.queues.dlq.waiting ? "bad" : "ok") : "na", un(s.queues) ? `${s.queues.dlq.waiting} message(s)` : "unavailable")].join("");
+    mini(s);
+  }
+  document.addEventListener("forge:alerts", e => {
+    const A = e.detail.filter(a => a.lvl !== "info"), bad = A.filter(a => a.lvl === "bad").length;
+    NX.count($("k-al"), A.length); $("k-al-s").textContent = A.length ? `${bad} critical · ${A.length - bad} warning — see the bell` : "no active alerts";
+  });
+
+  // ---------- live fulfilment tracker (real order_events)
+  let follow = null, trkTimer = null;
+  async function tracker() {
+    clearTimeout(trkTimer); if (!follow) return;
+    let d; try { d = await NX.get(`/api/orders/${follow.id}`); } catch (e) { trkTimer = setTimeout(tracker, 10000); return; }
+    const cur = stageOf(d.status), rejected = d.status === "REJECTED" || d.status === "FAILED";
+    const seen = new Set(d.events.map(e => e.status)), lastGood = Math.max(-1, ...d.events.map(e => stageOf(e.status)));
+    $("trk").innerHTML = STAGES.map((st, i) => {
+      const t = d.events.filter(e => st.k.includes(e.status)).map(e => e.t.slice(0, 8)).pop();
+      let cls = "";
+      if (rejected) cls = i <= lastGood ? "done" : i === lastGood + 1 ? "bad" : "";
+      else cls = d.status === "COMPLETED" || i < cur ? "done" : i === cur ? "cur" : "";
+      return `<div class="st ${cls}"><div class="ring"><span data-icon="${st.ic}" data-size="18"></span></div><b>${st.l}</b><small>${t || st.s}</small></div>`;
+    }).join("");
+    $("trk").querySelectorAll("[data-icon]").forEach(el => el.innerHTML = NX.icon(el.dataset.icon, 18));
+    $("trk-meta").innerHTML = `<span>ORDER <b style="color:var(--text)">#${follow.id}</b></span><span>${NX.esc(follow.company)}</span><span>${NX.esc(follow.priority)}</span><span>${NX.pkr(follow.total)}</span>
+      <span>SWF RUN <b style="color:var(--text)">${d.workflow_run_id ? NX.esc(d.workflow_run_id.slice(0, 14)) + "…" : "—"}</b></span><span>STATUS <span class="badge ${d.status}">${d.status}</span></span>`;
+    const le = d.events[d.events.length - 1];
+    $("trk-last").innerHTML = le ? `<span class="dot ${rejected ? "bad" : d.status === "COMPLETED" ? "ok" : "warn"}"></span> &nbsp;<b>${NX.esc(le.status)}</b> · ${NX.esc(le.detail)} <span class="dim mono">· ${NX.esc(le.actor)} · ${NX.esc(le.t)}</span>` : "No events recorded yet.";
+    $("trk-open").href = `/orders/${follow.id}`;
+    trkTimer = setTimeout(tracker, d.status === "COMPLETED" || rejected ? 15000 : 2000);
+  }
+
+  // ---------- recent orders: search + sort
+  let rows = [], sortK = "id", sortD = -1;
+  function renderOrders() {
+    const q = $("o-q").value.trim().toLowerCase();
+    const list = rows.filter(r => !q || `#${r.id} ${r.company} ${r.status} ${r.priority}`.toLowerCase().includes(q))
+      .sort((a, b) => { const x = a[sortK], y = b[sortK]; return (x > y ? 1 : x < y ? -1 : 0) * sortD; });
+    $("orders").innerHTML = list.length ? list.slice(0, 14).map(r => `<tr><td><a href="/orders/${r.id}">#${r.id}</a></td><td>${NX.esc(r.company)}</td><td><span class="badge ${r.status}">${r.status}</span></td>
+      <td>${r.priority === "EXPRESS" ? '<span class="badge warn">EXPRESS</span>' : '<span class="dim">standard</span>'}</td><td class="num">${NX.pkr(r.total)}</td>
+      <td class="num mono">${r.status === "COMPLETED" ? r.secs + " s" : "—"}</td><td class="dim" style="font-size:12px">${NX.ago(r.created_at)}</td></tr>`).join("")
+      : `<tr><td colspan="7" class="empty">${rows.length ? "No orders match the search." : "No orders yet — place one from the customer portal."}</td></tr>`;
+    document.querySelectorAll(".th-sort").forEach(th => th.dataset.k === sortK ? th.setAttribute("aria-sort", sortD > 0 ? "ascending" : "descending") : th.removeAttribute("aria-sort"));
+  }
+  document.querySelectorAll(".th-sort").forEach(th => { const go = () => { sortD = sortK === th.dataset.k ? -sortD : -1; sortK = th.dataset.k; renderOrders(); };
+    th.addEventListener("click", go); th.addEventListener("keydown", e => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), go())); });
+  $("o-q").addEventListener("input", renderOrders);
+  async function orders() {
+    const o = await NX.get("/api/ops/orders?limit=60");
+    if (!un(o)) { $("orders").innerHTML = '<tr><td colspan="7" class="empty">Orders unavailable</td></tr>'; return; }
+    rows = o.items.map(r => ({ ...r, total: +r.total, secs: +r.secs || 0 })); renderOrders();
+    const sel = $("trk-sel"), keep = sel.value;
+    sel.innerHTML = rows.slice(0, 15).map(r => `<option value="${r.id}">#${r.id} · ${NX.esc(r.company)} · ${r.status}</option>`).join("");
+    if (!rows.length) { $("trk").innerHTML = '<div class="empty" style="grid-column:1/-1">No orders yet — the tracker follows the newest order automatically.</div>'; return; }
+    const active = rows.find(r => !["COMPLETED", "REJECTED", "FAILED"].includes(r.status));
+    sel.value = keep && rows.some(r => String(r.id) === keep) ? keep : String((active || rows[0]).id);
+    const next = rows.find(r => String(r.id) === sel.value);
+    if (!follow || follow.id !== next.id) { follow = next; tracker(); } else follow = next;
+  }
+  $("trk-sel").addEventListener("change", e => { follow = rows.find(r => String(r.id) === e.target.value); tracker(); });
+
+  // ---------- activity + telemetry
+  async function feed() {
+    const a = await NX.get("/api/ops/activity?limit=25");
+    $("feed").innerHTML = un(a) && a.items.length ? a.items.map(e => `<div class="it"><span class="dot ${e.status === "COMPLETED" ? "ok" : e.status === "REJECTED" ? "bad" : "info"}"></span>
+      <div><b class="mono" style="font-size:11.5px">#${e.order_id} ${NX.esc(e.status)}</b> <span class="muted">${NX.esc(e.company)}</span><div class="muted" style="font-size:12.5px">${NX.esc(e.detail)}</div></div><small>${NX.ago(e.ts)}</small></div>`).join("")
+      : `<div class="empty">${un(a) ? "No backend activity recorded yet" : "Activity unavailable"}</div>`;
+  }
+  async function tele() {
+    const t = await NX.get("/api/ops/telemetry");
+    $("tele").innerHTML = un(t) && t.machines.length ? t.machines.map(m => {
+      const pct = Math.min(100, Math.max(0, m.temperature / 120 * 100)), col = m.status === "critical" ? "var(--red)" : m.status === "warning" ? "var(--amber)" : "var(--green)";
+      return `<div style="display:grid;grid-template-columns:150px 1fr 64px 92px;gap:14px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)">
+        <div><b class="mono" style="font-size:12.5px">${NX.esc(m.machine_id)}</b><div class="dim mono" style="font-size:11px">${NX.num(m.run_hours)} h · ${NX.ago(m.ts)}</div></div>
+        <div style="height:8px;border-radius:4px;background:rgba(148,163,184,.12);overflow:hidden"><i style="display:block;height:100%;width:${pct}%;background:${col};border-radius:4px;transition:width .8s"></i></div>
+        <span class="mono" style="color:${col};text-align:right">${m.temperature}°C</span><span class="badge ${m.status}" style="justify-self:end">${NX.esc(m.fault_code || m.status.toUpperCase())}</span></div>`; }).join("")
+      + '<p class="dim mono" style="font-size:10.5px;margin:10px 0 0">Latest stored reading per machine · scale 0–120 °C</p>'
+      : `<div class="empty">${un(t) ? "No machine has reported telemetry yet." : "Telemetry unavailable"}</div>`;
+  }
+
+  // ---------- compact clickable architecture
+  const MN = [["customer", "Customers", 20, 40, "ext"], ["r53", "Route 53", 20, 130, "net"], ["alb", "Load Balancer", 170, 130, "net"],
+    ["weba", "EC2 web · AZ-a", 330, 90, "compute"], ["webb", "EC2 web · AZ-b", 330, 170, "compute"], ["rdsp", "RDS primary", 500, 40, "db"], ["rdss", "RDS standby", 660, 40, "db"],
+    ["sqs", "SQS orders", 500, 150, "int"], ["wka", "Workers ASG", 660, 150, "compute"], ["swf", "SWF workflow", 500, 240, "int"], ["s3d", "S3 · KMS", 660, 240, "store"], ["sns", "SNS", 660, 200, "int"]];
+  const ML = [["customer", "r53"], ["r53", "alb"], ["alb", "weba"], ["alb", "webb"], ["weba", "rdsp"], ["webb", "rdsp"], ["rdsp", "rdss"], ["weba", "sqs"], ["webb", "sqs"], ["sqs", "wka"], ["wka", "swf"], ["wka", "rdsp"], ["wka", "s3d"], ["wka", "sns"]];
+  const KC = { ext: "#94A3B8", net: "#A78BFA", compute: "#FFB800", db: "#C084FC", int: "#F472B6", store: "#22C55E" };
+  let miniBuilt = false;
+  function mini(s) {
+    const svg = $("mini"), at = Object.fromEntries(MN.map(n => [n[0], n]));
+    if (!miniBuilt) {
+      const ctr = n => [n[2] + 70, n[3] + 17];
+      svg.innerHTML = `<g>${ML.map(([a, b], i) => { const [x1, y1] = ctr(at[a]), [x2, y2] = ctr(at[b]); return `<path id="ml${i}" d="M${x1},${y1}L${x2},${y2}" stroke="rgba(0,217,255,.28)" stroke-width="1.3" fill="none"/>`
+        + (window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "" : `<circle r="2.6" fill="${i > 6 ? "#FFB800" : "#00D9FF"}"><animateMotion dur="${2.4 + (i % 4) * .5}s" repeatCount="indefinite"><mpath href="#ml${i}"/></animateMotion></circle>`); }).join("")}</g>`
+        + MN.map(([id, l, x, y, k]) => `<a class="mn" href="/ops/architecture#${id}" aria-label="${l} — open in Architecture Explorer"><g><rect x="${x}" y="${y}" width="140" height="34" rx="8" fill="#132036" stroke="rgba(148,163,184,.3)"/>
+          <rect x="${x}" y="${y + 8}" width="3" height="18" rx="1.5" fill="${KC[k]}"/><text x="${x + 12}" y="${y + 21.5}" fill="#F5F8FF" font-size="12" font-weight="600" font-family="Geist, Inter">${l}</text>
+          <text id="mv-${id}" x="${x + 132}" y="${y + 21.5}" text-anchor="end" fill="#22C55E" font-size="10.5" font-family="Geist Mono, monospace"></text></g></a>`).join("");
+      miniBuilt = true;
+    }
+    const set = (id, v, c = "#22C55E") => { const e = document.getElementById("mv-" + id); if (e) { e.textContent = v; e.setAttribute("fill", c); } };
+    if (un(s.compute) && s.compute.web) { const z = a => Object.entries(s.compute.web.by_az || {}).filter(([k]) => k.endsWith(a)).reduce((t, [, v]) => t + v, 0); set("weba", z("a")); set("webb", z("b")); }
+    if (un(s.compute) && s.compute.workers) set("wka", `${s.compute.workers.in_service}/${s.compute.workers.max}`);
+    if (un(s.queues)) set("sqs", s.queues.orders.waiting, s.queues.orders.waiting > 10 ? "#FFB800" : "#22C55E");
+    if (un(s.workflows)) set("swf", `${s.workflows.open} open`);
+    const rp = (s.health.probes || []).find(p => p.name.startsWith("RDS")); if (rp) set("rdsp", rp.state === "ok" ? rp.ms + "ms" : "DOWN", rp.state === "ok" ? "#22C55E" : "#FF4D67");
+  }
+
+  NX.poll(summary, 15000); NX.poll(orders, 12000); NX.poll(feed, 10000); NX.poll(tele, 20000);
+})();
+</script>
+{% endblock %}

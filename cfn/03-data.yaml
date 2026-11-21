@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MegaFab 03 - Data layer. Amazon RDS for MySQL, Multi-AZ, KMS-encrypted, TLS-only,
+  automated backups (7 days, point-in-time recovery). Credentials generated into
+  AWS Secrets Manager - no password ever appears in code or templates.
+
+Parameters:
+  Project: { Type: String, Default: megafab }
+  DataSubnets: { Type: CommaDelimitedList }
+  DbSg: { Type: AWS::EC2::SecurityGroup::Id }
+  KeyArn: { Type: String }
+  DbInstanceClass: { Type: String, Default: db.t3.micro }
+  MultiAZ: { Type: String, AllowedValues: ["true", "false"], Default: "true" }
+
+Resources:
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${Project}/rds/master"
+      Description: MegaFab RDS master credentials
+      KmsKeyId: !Ref KeyArn
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"megafab_admin"}'
+        GenerateStringKey: password
+        PasswordLength: 28
+        ExcludePunctuation: true
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: MegaFab private data subnets (2 AZs)
+      SubnetIds: !Ref DataSubnets
+
+  DbParams:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Family: mysql8.0
+      Description: MegaFab - enforce TLS for every connection
+      Parameters:
+        require_secure_transport: "1"
+        slow_query_log: "1"
+        long_query_time: "2"
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "${Project}-orders-db"
+      Engine: mysql
+      EngineVersion: "8.0"
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: "20"
+      MaxAllocatedStorage: 50
+      StorageType: gp3
+      StorageEncrypted: true
+      KmsKeyId: !Ref KeyArn
+      MultiAZ: !Ref MultiAZ
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSg]
+      DBParameterGroupName: !Ref DbParams
+      PubliclyAccessible: false
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:password}}"
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: "21:00-21:30"          # 02:00 PKT
+      PreferredMaintenanceWindow: "sun:22:00-sun:22:30"
+      CopyTagsToSnapshot: true
+      DeletionProtection: false                     # lab: allow clean teardown (final snapshot is kept)
+      AutoMinorVersionUpgrade: true
+      EnableCloudwatchLogsExports: [error, slowquery]
+      Tags: [{ Key: Project, Value: !Ref Project }, { Key: Backup, Value: daily-7d }]
+
+  SecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties: { SecretId: !Ref DbSecret, TargetId: !Ref Database, TargetType: "AWS::RDS::DBInstance" }
+
+Outputs:
+  DbEndpoint: { Value: !GetAtt Database.Endpoint.Address }
+  DbSecretArn: { Value: !Ref DbSecret }
+  DbInstanceId: { Value: !Ref Database }

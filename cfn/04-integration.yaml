@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MegaFab 04 - Application integration. SQS order queue + dead-letter queue, SNS
+  notification topic with audience filtering, and the SWF fulfilment domain /
+  workflow / activity types (registered by a custom resource because CloudFormation
+  has no native SWF resource).
+
+Parameters:
+  Project: { Type: String, Default: megafab }
+  KeyArn: { Type: String }
+  LabRoleArn: { Type: String }
+  NotificationEmail: { Type: String, Description: Operations staff email for SNS }
+
+Resources:
+  OrdersDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${Project}-orders-dlq"
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: !Ref KeyArn
+  OrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${Project}-orders"
+      VisibilityTimeout: 60
+      ReceiveMessageWaitTimeSeconds: 20          # long polling - fewer empty receives = lower cost
+      MessageRetentionPeriod: 345600
+      KmsMasterKeyId: !Ref KeyArn
+      KmsDataKeyReusePeriodSeconds: 3600
+      RedrivePolicy: { deadLetterTargetArn: !GetAtt OrdersDlq.Arn, maxReceiveCount: 5 }
+  QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref OrdersQueue]
+      PolicyDocument:
+        Statement:
+          - { Sid: DenyInsecureTransport, Effect: Deny, Principal: "*", Action: "sqs:*", Resource: !GetAtt OrdersQueue.Arn, Condition: { Bool: { "aws:SecureTransport": false } } }
+  DlqPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref OrdersDlq]
+      PolicyDocument:
+        Statement:
+          - { Sid: DenyInsecureTransport, Effect: Deny, Principal: "*", Action: "sqs:*", Resource: !GetAtt OrdersDlq.Arn, Condition: { Bool: { "aws:SecureTransport": false } } }
+
+  OrderEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${Project}-order-events"
+      DisplayName: MegaFab
+      KmsMasterKeyId: !Ref KeyArn
+  StaffSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderEventsTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+      FilterPolicy: { audience: [staff] }      # staff receive staff messages; customers only their own
+  OpsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${Project}-ops-alarms"
+      DisplayName: MegaFab Ops
+      KmsMasterKeyId: !Ref KeyArn
+      Subscription: [{ Protocol: email, Endpoint: !Ref NotificationEmail }]
+  TopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref OrderEventsTopic]
+      PolicyDocument:
+        Statement:
+          - Sid: AccountPublish
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root" }
+            Action: [sns:Publish, sns:Subscribe, sns:GetTopicAttributes, sns:ListSubscriptionsByTopic]
+            Resource: !Ref OrderEventsTopic
+          - { Sid: DenyInsecureTransport, Effect: Deny, Principal: "*", Action: sns:Publish, Resource: !Ref OrderEventsTopic, Condition: { Bool: { "aws:SecureTransport": false } } }
+  OpsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref OpsTopic]
+      PolicyDocument:
+        Statement:
+          - Sid: AccountPublish
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root" }
+            Action: [sns:Publish, sns:Subscribe, sns:GetTopicAttributes, sns:ListSubscriptionsByTopic]
+            Resource: !Ref OpsTopic
+          - { Sid: CloudWatchAlarms, Effect: Allow, Principal: { Service: cloudwatch.amazonaws.com }, Action: sns:Publish, Resource: !Ref OpsTopic }
+          - { Sid: DenyInsecureTransport, Effect: Deny, Principal: "*", Action: sns:Publish, Resource: !Ref OpsTopic, Condition: { Bool: { "aws:SecureTransport": false } } }
+
+  DlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Project}-orders-in-dlq"
+      AlarmDescription: An order failed processing 5 times and is in the dead-letter queue
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{ Name: QueueName, Value: !GetAtt OrdersDlq.QueueName }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OpsTopic]
+
+  # ---------------------------------------------------------------- SWF via custom resource
+  SwfRegistrarFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Project}-swf-registrar"
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 120
+      Role: !Ref LabRoleArn
+      Code:
+        ZipFile: |
+          import json, urllib.request, boto3
+          swf = boto3.client("swf")
+          ACTS = ["ValidateOrder", "ReserveStock", "GenerateInvoice", "ArrangeShipment", "NotifyCustomer"]
+          def send(e, status, data, reason=""):
+              body = json.dumps({"Status": status, "Reason": reason or "ok", "PhysicalResourceId": e["ResourceProperties"]["Domain"],
+                                 "StackId": e["StackId"], "RequestId": e["RequestId"], "LogicalResourceId": e["LogicalResourceId"], "Data": data}).encode()
+              urllib.request.urlopen(urllib.request.Request(e["ResponseURL"], data=body, method="PUT", headers={"Content-Type": ""}))
+          def ignore_exists(fn, **kw):
+              try: fn(**kw)
+              except (swf.exceptions.DomainAlreadyExistsFault, swf.exceptions.TypeAlreadyExistsFault): pass
+          def handler(e, c):
+              d = e["ResourceProperties"]["Domain"]
+              try:
+                  if e["RequestType"] in ("Create", "Update"):
+                      ignore_exists(swf.register_domain, name=d, description="MegaFab order fulfilment", workflowExecutionRetentionPeriodInDays="30")
+                      try: swf.undeprecate_domain(name=d)   # re-deploy after a teardown re-activates the domain
+                      except Exception: pass
+                      ignore_exists(swf.register_workflow_type, domain=d, name="OrderFulfilment", version="1.0",
+                                    description="Validate > Reserve stock > Invoice > Ship > Notify",
+                                    defaultTaskStartToCloseTimeout="60", defaultExecutionStartToCloseTimeout="3600",
+                                    defaultTaskList={"name": "megafab-decisions"}, defaultChildPolicy="TERMINATE")
+                      for a in ACTS:
+                          ignore_exists(swf.register_activity_type, domain=d, name=a, version="1.0",
+                                        defaultTaskList={"name": "megafab-activities"}, defaultTaskStartToCloseTimeout="60",
+                                        defaultTaskScheduleToStartTimeout="240", defaultTaskScheduleToCloseTimeout="300",
+                                        defaultTaskHeartbeatTimeout="NONE")
+                      # a previous teardown deprecates the types too - re-activate them so redeploys are idempotent
+                      for fn, kw in [(swf.undeprecate_workflow_type, {"workflowType": {"name": "OrderFulfilment", "version": "1.0"}})] + \
+                                    [(swf.undeprecate_activity_type, {"activityType": {"name": a, "version": "1.0"}}) for a in ACTS]:
+                          try: fn(domain=d, **kw)
+                          except Exception: pass
+                  else:
+                      try: swf.deprecate_domain(name=d)
+                      except Exception as ex: print(ex)
+                  send(e, "SUCCESS", {"Domain": d})
+              except Exception as ex:
+                  print(ex); send(e, "FAILED", {}, str(ex)[:200])
+  SwfDomain:
+    Type: Custom::SwfDomain
+    Properties: { ServiceToken: !GetAtt SwfRegistrarFn.Arn, Domain: MegaFab-Fulfilment }
+
+Outputs:
+  OrdersQueueUrl: { Value: !Ref OrdersQueue }
+  OrdersQueueArn: { Value: !GetAtt OrdersQueue.Arn }
+  OrdersQueueName: { Value: !GetAtt OrdersQueue.QueueName }
+  DlqUrl: { Value: !Ref OrdersDlq }
+  TopicArn: { Value: !Ref OrderEventsTopic }
+  OpsTopicArn: { Value: !Ref OpsTopic }
+  SwfDomain: { Value: !GetAtt SwfDomain.Domain }
